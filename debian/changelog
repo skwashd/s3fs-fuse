@@ -1,0 +1,5 @@
+s3fs-fuse (1.78-1) UNRELEASED; urgency=low
+
+  * Initial release. (Closes: #601789)
+
+ -- Andriy Senkovych <jolly_roger@itblog.org.ua>  Thu, 31 Jul 2014 18:30:59 +0300
