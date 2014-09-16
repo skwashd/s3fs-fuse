@@ -1,7 +1,5 @@
 #!/usr/bin/make -f
 
-export PKG_CONFIG = /usr/bin/pkg-config
-
 DPKG_EXPORT_BUILDFLAGS = 1
 include /usr/share/dpkg/buildflags.mk
 CFLAGS+=$(CPPFLAGS)
@@ -17,5 +15,5 @@ override_dh_strip:
 	dh_strip --dbg-package=s3fs-dbg
 
 override_dh_auto_test:
-	# tests disabled as they require credentals in ~/.passwd-s3fs.
+	echo Tests disabled as they require credentals in ~/.passwd-s3fs.
 
