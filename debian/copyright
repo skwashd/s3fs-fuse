@@ -4,11 +4,11 @@ Source: https://github.com/s3fs-fuse/s3fs-fuse/releases
 
 Files: *
 Copyright: 2004-2006, IBM Corp.
-           2011-2014, Randy Rizun <rrizun@gmail.com>
-           2011-2014, Dan Moore <mooredan@suncup.net>
-           2011-2014, Adrian Petrescu <apetresc@gmail.com>
-           2011-2014, Ben LeMasurier <ben.lemasurier@gmail.com>
-           2011-2014, Takeshi Nakatani <ggtakec@gmail.com>
+           2007-2008, Randy Rizun <rrizun@gmail.com>
+           2007-2013, Takeshi Nakatani <ggtakec@gmail.com>
+           2011-2013, Dan Moore <mooredan@suncup.net>
+           2011-2013, Adrian Petrescu <apetresc@gmail.com>
+           2011-2013, Ben LeMasurier <ben.lemasurier@gmail.com>
 License: GPL-2+
 
 Files: debian/*
