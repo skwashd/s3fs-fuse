@@ -2,21 +2,24 @@ Source: s3fs-fuse
 Section: utils
 Priority: optional
 Maintainer: Andriy Senkovych <jolly_roger@itblog.org.ua>
-Build-Depends: debhelper (>= 7.0.50~),
+Build-Depends: debhelper (>= 9),
                dh-autoreconf,
-               pkg-config,
-               libfuse-dev (>= 2.8.4),
-               libxml2-dev (>= 2.6),
-               libcurl4-gnutls-dev (>= 7.0),
-               libgnutls-dev (>= 2.12.0)
-Standards-Version: 3.9.6.0
-Homepage: https://code.google.com/p/s3fs
+               libcurl4-gnutls-dev,
+               libfuse-dev,
+               libgcrypt20-dev,
+               libgnutls28-dev,
+               libxml2-dev,
+               pkg-config
+Standards-Version: 3.9.6
+Homepage: https://github.com/s3fs-fuse/s3fs-fuse
 Vcs-Browser: http://github.com/jollyroger/s3fs-fuse
 Vcs-Git: git://github.com/jollyroger/s3fs-fuse.git -b debian
 
 Package: s3fs
 Architecture: any
-Depends: ${misc:Depends}, ${shlibs:Depends}, fuse, mime-support
+Depends: mime-support,
+         ${misc:Depends},
+         ${shlibs:Depends}
 Description: FUSE-based file system backed by Amazon S3
  s3fs is a FUSE filesystem that allows you to mount an Amazon S3 bucket
  as a local filesystem.  It stores files natively and transparently in
@@ -30,7 +33,9 @@ Package: s3fs-dbg
 Section: debug
 Architecture: any
 Priority: extra
-Depends: ${shlibs:Depends}, ${misc:Depends}, s3fs (= ${binary:Version})
+Depends: s3fs (= ${binary:Version}),
+         ${misc:Depends},
+         ${shlibs:Depends}
 Description: FUSE-based file system backed by Amazon S3 (debugging symbols)
  s3fs is a FUSE filesystem that allows you to mount an Amazon S3 bucket
  as a local filesystem.  It stores files natively and transparently in
