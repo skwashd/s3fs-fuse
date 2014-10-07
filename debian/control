@@ -17,7 +17,8 @@ Vcs-Git: git://github.com/jollyroger/s3fs-fuse.git -b debian
 
 Package: s3fs
 Architecture: any
-Depends: mime-support,
+Depends: fuse,
+         mime-support,
          ${misc:Depends},
          ${shlibs:Depends}
 Description: FUSE-based file system backed by Amazon S3
