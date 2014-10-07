@@ -2,4 +2,4 @@ s3fs-fuse (1.78-1) unstable; urgency=low
 
   * Initial release. (Closes: #601789)
 
- -- Andriy Senkovych <jolly_roger@itblog.org.ua>  Fri, 03 Oct 2014 14:14:52 +0200
+ -- Andriy Senkovych <jolly_roger@itblog.org.ua>  Tue, 07 Oct 2014 16:18:29 +0300
