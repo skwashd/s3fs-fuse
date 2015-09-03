@@ -85,7 +85,7 @@ class PageList
     bool IsInit(off_t start, off_t size);
     bool SetInit(off_t start, off_t size, bool is_init = true);
     bool FindUninitPage(off_t start, off_t& resstart, size_t& ressize);
-    int GetUninitPages(fdpage_list_t& uninit_list, off_t start = 0);
+    int GetUninitPages(fdpage_list_t& uninit_list, off_t start = 0, off_t size = -1);
     bool Serialize(CacheFileStat& file, bool is_output);
     void Dump(void);
 };
@@ -102,7 +102,7 @@ class FdEntity
     int             refcnt;     // reference count
     std::string     path;       // object path
     std::string     cachepath;  // local cache file path
-    int             fd;         // file discriptor(tmp file or cache file)
+    int             fd;         // file descriptor(tmp file or cache file)
     FILE*           file;       // file pointer(tmp file or cache file)
     bool            is_modify;  // if file is changed, this flag is true
 
@@ -119,6 +119,7 @@ class FdEntity
     bool IsOpen(void) const { return (-1 != fd); }
     int Open(off_t size = -1, time_t time = -1);
     const char* GetPath(void) const { return path.c_str(); }
+    void SetPath(const std::string &newpath) { path = newpath; }
     int GetFd(void) const { return fd; }
     int SetMtime(time_t time);
     bool GetSize(off_t& size);
@@ -165,10 +166,12 @@ class FdManager
     static size_t SetPageSize(size_t size);
     static size_t GetPageSize(void) { return FdManager::page_size; }
     static bool MakeCachePath(const char* path, std::string& cache_path, bool is_create_dir = true);
+    static bool MakeRandomTempPath(const char* path, std::string& tmppath);
 
-    FdEntity* GetFdEntity(const char* path);
+    FdEntity* GetFdEntity(const char* path, int existfd = -1);
     FdEntity* Open(const char* path, off_t size = -1, time_t time = -1, bool force_tmpfile = false, bool is_create = true);
-    FdEntity* ExistOpen(const char* path) { return Open(path, -1, -1, false, false); }
+    FdEntity* ExistOpen(const char* path, int existfd = -1);
+    void Rename(const std::string &from, const std::string &to);
     bool Close(FdEntity* ent);
 };
 

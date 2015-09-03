@@ -10,7 +10,7 @@ S3FS \- FUSE-based file system backed by Amazon S3
 \fBumount mountpoint
 .SS utility mode ( remove interrupted multipart uploading objects )
 .TP
-\fBs3fs -u bucket
+\fBs3fs \-u bucket
 .SH DESCRIPTION
 s3fs is a FUSE filesystem that allows you to mount an Amazon S3 bucket as a local filesystem. It stores files natively and transparently in S3 (i.e., you can use other programs to access the same files).
 .SH AUTHENTICATION
@@ -53,9 +53,6 @@ the default canned acl to apply to all written S3 objects, e.g., "public-read".
 Any created files will have this canned acl.
 Any updated files will also have this canned acl applied!
 .TP
-\fB\-o\fR prefix (default="") (coming soon!)
-a prefix to append to all S3 objects.
-.TP
 \fB\-o\fR retries (default="2")
 number of times to retry a failed S3 transaction.
 .TP
@@ -71,7 +68,7 @@ this option can not be specified with use_sse.
 (can specify use_rrs=1 for old version)
 .TP
 \fB\-o\fR use_sse (default is disable)
-use AmazonÅfs Server-Site Encryption or Server-Side Encryption with Customer-Provided Encryption Keys.
+use Amazon's Server-Site Encryption or Server-Side Encryption with Customer-Provided Encryption Keys.
 this option can not be specified with use_rrs. specifying only "use_sse" or "use_sse=1" enables Server-Side Encryption.(use_sse=1 for old version)
 specifying this option with file path which has some SSE-C secret key enables Server-Side Encryption with Customer-Provided Encryption Keys.(use_sse=file)
 the file must be 600 permission. the file can have some lines, each line is one SSE-C key. the first line in file is used as Customer-Provided Encryption Keys for uploading and change headers etc.
@@ -103,10 +100,10 @@ If you specify this option for set "Content-Encoding" HTTP header, please take c
 \fB\-o\fR public_bucket (default="" which means disabled)
 anonymously mount a public bucket when set to 1, ignores the $HOME/.passwd-s3fs and /etc/passwd-s3fs files.
 .TP
-\fB\-o\fR connect_timeout (default="10" seconds)
+\fB\-o\fR connect_timeout (default="300" seconds)
 time to wait for connection before giving up.
 .TP
-\fB\-o\fR readwrite_timeout (default="30" seconds)
+\fB\-o\fR readwrite_timeout (default="60" seconds)
 time to wait between read/write activity before giving up.
 .TP
 \fB\-o\fR max_stat_cache_size (default="1000" entries (about 4MB))
@@ -120,6 +117,9 @@ enable cache entries for the object which does not exist.
 s3fs always has to check whether file(or sub directory) exists under object(path) when s3fs does some command, since s3fs has recognized a directory which does not exist and has files or sub directories under itself.
 It increases ListBucket request and makes performance bad.
 You can specify this option for performance, s3fs memorizes in stat cache that the object(file or directory) does not exist.
+.TP
+\fB\-o\fR no_check_certificate (by default this option is disabled) - do not check ssl certificate.
+server certificate won't be checked against the available certificate authorities.
 .TP
 \fB\-o\fR nodnscache - disable dns cache.
 s3fs is always using dns cache, this option make dns cache disable.
@@ -138,7 +138,7 @@ It is necessary to set this value depending on a CPU and a network band.
 This option is lated to fd_page_size option and affects it.
 .TP
 \fB\-o\fR fd_page_size(default="52428800"(50MB))
-number of internal management page size for each file discriptor.
+number of internal management page size for each file descriptor.
 For delayed reading and writing by s3fs, s3fs manages pages which is separated from object. Each pages has a status that data is already loaded(or not loaded yet).
 This option should not be changed when you don't have a trouble with performance.
 This value is changed automatically by parallel_count and multipart_size values(fd_page_size value = parallel_count * multipart_size).
@@ -151,6 +151,22 @@ This option is lated to fd_page_size option and affects it.
 .TP
 \fB\-o\fR url (default="http://s3.amazonaws.com")
 sets the url to use to access Amazon S3. If you want to use HTTPS, then you can set url=https://s3.amazonaws.com
+.TP
+\fB\-o\fR endpoint (default="us-east-1")
+sets the endpoint to use.
+If this option is not specified, s3fs uses \"us-east-1\" region as the default.
+If the s3fs could not connect to the region specified by this option, s3fs could not run.
+But if you do not specify this option, and if you can not connect with the default region, s3fs will retry to automatically connect to the other region.
+So s3fs can know the correct region name, because s3fs can find it in an error from the S3 server.
+.TP
+\fB\-o\fR sigv2 (default is signature version 4)
+sets signing AWS requests by sing Signature Version 2.
+.TP
+\fB\-o\fR mp_umask (default is "0000")
+sets umask for the mount point directory.
+If allow_other option is not set, s3fs allows access to the mount point only to the owner.
+In the opposite case s3fs allows access to all users as the default.
+But if you set the allow_other with this option, you can controll the permission permissions of the mount point by this option like umask.
 .TP
 \fB\-o\fR nomultipart - disable multipart uploads
 .TP
@@ -180,7 +196,7 @@ If this option is specified with nocopapi, the s3fs ignores it.
 Enble compatibility with S3-like APIs which do not support the virtual-host request style, by using the older path request style.
 .SH FUSE/MOUNT OPTIONS
 .TP
-Most of the generic mount options described in 'man mount' are supported (ro, rw, suid, nosuid, dev, nodev, exec, noexec, atime, noatime, sync async, dirsync).  Filesystems are mounted with '-onodev,nosuid' by default, which can only be overridden by a privileged user.
+Most of the generic mount options described in 'man mount' are supported (ro, rw, suid, nosuid, dev, nodev, exec, noexec, atime, noatime, sync async, dirsync).  Filesystems are mounted with '\-onodev,nosuid' by default, which can only be overridden by a privileged user.
 .TP
 There are many FUSE specific mount options that can be specified. e.g. allow_other. See the FUSE README for the full set.
 .SH NOTES
