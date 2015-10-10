@@ -34,8 +34,9 @@ class CacheFileStat
 
   public:
     static bool DeleteCacheFileStat(const char* path);
+    static bool CheckCacheFileStatTopDir(void);
 
-    CacheFileStat(const char* tpath = NULL);
+    explicit CacheFileStat(const char* tpath = NULL);
     ~CacheFileStat();
 
     bool Open(void);
@@ -76,7 +77,7 @@ class PageList
   public:
     static void FreeList(fdpage_list_t& list);
 
-    PageList(off_t size = 0, bool is_init = false);
+    explicit PageList(off_t size = 0, bool is_init = false);
     ~PageList();
 
     off_t Size(void) const;
@@ -112,7 +113,7 @@ class FdEntity
     bool SetAllStatus(bool is_enable);
 
   public:
-    FdEntity(const char* tpath = NULL, const char* cpath = NULL);
+    explicit FdEntity(const char* tpath = NULL, const char* cpath = NULL);
     ~FdEntity();
 
     void Close(void);
@@ -166,6 +167,7 @@ class FdManager
     static size_t SetPageSize(size_t size);
     static size_t GetPageSize(void) { return FdManager::page_size; }
     static bool MakeCachePath(const char* path, std::string& cache_path, bool is_create_dir = true);
+    static bool CheckCacheTopDir(void);
     static bool MakeRandomTempPath(const char* path, std::string& tmppath);
 
     FdEntity* GetFdEntity(const char* path, int existfd = -1);
