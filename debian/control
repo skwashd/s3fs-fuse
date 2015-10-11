@@ -13,7 +13,7 @@ Build-Depends: debhelper (>= 9),
                pkg-config
 Standards-Version: 3.9.6
 Homepage: https://github.com/s3fs-fuse/s3fs-fuse
-Vcs-Browser: https://github.com/jollyroger/s3fs-fuse
+Vcs-Browser: https://github.com/jollyroger/s3fs-fuse/tree/debian
 Vcs-Git: git://github.com/jollyroger/s3fs-fuse.git -b debian
 
 Package: s3fs
