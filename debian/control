@@ -17,7 +17,7 @@ Vcs-Browser: https://anonscm.debian.org/cgit/collab-maint/s3fs-fuse.git
 Vcs-Git: git://anonscm.debian.org/collab-maint/s3fs-fuse.git -b debian
 
 Package: s3fs
-Architecture: any
+Architecture: linux-any kfreebsd-any
 Depends: fuse,
          mime-support,
          ${misc:Depends},
@@ -33,7 +33,7 @@ Description: FUSE-based file system backed by Amazon S3
 
 Package: s3fs-dbg
 Section: debug
-Architecture: any
+Architecture: linux-any kfreebsd-any
 Priority: extra
 Depends: s3fs (= ${binary:Version}),
          ${misc:Depends},
