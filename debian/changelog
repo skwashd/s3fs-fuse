@@ -1,3 +1,9 @@
+s3fs-fuse (1.79+git90-g8f11507-1~bpo8+1) jessie-backports; urgency=medium
+
+  * Rebuild for jessie-backports.
+
+ -- Mattia Rizzolo <mattia@debian.org>  Tue, 08 Dec 2015 15:19:52 +0000
+
 s3fs-fuse (1.79+git90-g8f11507-1) unstable; urgency=low
 
   * Initial release. (Closes: #601789)
