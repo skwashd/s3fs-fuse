@@ -13,8 +13,8 @@ Build-Depends: debhelper (>= 9),
                pkg-config
 Standards-Version: 3.9.7
 Homepage: https://github.com/s3fs-fuse/s3fs-fuse
-Vcs-Browser: https://anonscm.debian.org/cgit/collab-maint/s3fs-fuse.git
-Vcs-Git: git://anonscm.debian.org/collab-maint/s3fs-fuse.git -b debian
+Vcs-Browser: https://anonscm.debian.org/git/collab-maint/s3fs-fuse.git
+Vcs-Git: https://anonscm.debian.org/git/collab-maint/s3fs-fuse.git -b debian
 
 Package: s3fs
 Architecture: linux-any kfreebsd-any
