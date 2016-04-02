@@ -1,3 +1,20 @@
+s3fs-fuse (1.79+git90-g8f11507-2) unstable; urgency=medium
+
+  [ Andriy Senkovych ]
+  * Update Vcs-* fields to point to collab-maint repository.
+  * Add some comments to gbp.conf.
+
+  [ Mattia Rizzolo ]
+  * debian/control:
+    + Build only for {linux,kfreebsd}-any since fuse is not available on hurd.
+    + Use my @debian.org email address.
+    + Bump Standards-Version to 3.9.7, no changes needed.
+    + Use https in Vcs-Git.
+  * Stop building s3fs-dbg package, nowadays we have automatic debug packages.
+  * Add patch to fix typo s/returing/returning/.
+
+ -- Mattia Rizzolo <mattia@debian.org>  Sat, 02 Apr 2016 15:32:26 +0000
+
 s3fs-fuse (1.79+git90-g8f11507-1) unstable; urgency=low
 
   * Initial release. (Closes: #601789)
