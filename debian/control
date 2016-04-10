@@ -11,7 +11,7 @@ Build-Depends: debhelper (>= 9),
                libgnutls28-dev,
                libxml2-dev,
                pkg-config
-Standards-Version: 3.9.7
+Standards-Version: 3.9.8
 Homepage: https://github.com/s3fs-fuse/s3fs-fuse
 Vcs-Browser: https://anonscm.debian.org/git/collab-maint/s3fs-fuse.git
 Vcs-Git: https://anonscm.debian.org/git/collab-maint/s3fs-fuse.git -b debian
