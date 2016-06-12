@@ -1,3 +1,9 @@
+s3fs-fuse (1.80-1) UNRELEASED; urgency=medium
+
+  * Import new upstream release 1.80.
+
+ -- Mattia Rizzolo <mattia@debian.org>  Sun, 12 Jun 2016 13:17:21 +0000
+
 s3fs-fuse (1.79+git90-g8f11507-2) unstable; urgency=medium
 
   [ Andriy Senkovych ]
