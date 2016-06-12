@@ -4,11 +4,13 @@ Source: https://github.com/s3fs-fuse/s3fs-fuse/releases
 
 Files: *
 Copyright: 2007-2008, Randy Rizun <rrizun@gmail.com>
+           2014       Andrew Gaul <andrew@gaul.org>
            2007-2013, Takeshi Nakatani <ggtakec@gmail.com>
 License: GPL-2+
 
 Files: debian/*
 Copyright: 2014 Andriy Senkovych <jolly_roger@itblog.org.ua>
+           2016 Mattia Rizzolo <mattia@debian.org>
 License: GPL-2+
 
 Files: autogen.sh
