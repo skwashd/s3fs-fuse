@@ -1,8 +1,11 @@
-s3fs-fuse (1.80-1) UNRELEASED; urgency=medium
+s3fs-fuse (1.80-1) unstable; urgency=medium
 
   * Import new upstream release 1.80.
+  * Drop patch fixing typo, applied upstream.
+  * Bump Standards-Version to 3.9.8, no changes needed.
+  * Update copyright.
 
- -- Mattia Rizzolo <mattia@debian.org>  Sun, 12 Jun 2016 13:17:21 +0000
+ -- Mattia Rizzolo <mattia@debian.org>  Sun, 12 Jun 2016 15:06:32 +0000
 
 s3fs-fuse (1.79+git90-g8f11507-2) unstable; urgency=medium
 
