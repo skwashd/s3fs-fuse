@@ -60,6 +60,20 @@ string get_realpath(const char *path) {
   return realpath;
 }
 
+inline headers_t::const_iterator find_content_type(headers_t& meta)
+{
+  headers_t::const_iterator iter;
+
+  if(meta.end() == (iter = meta.find("Content-Type"))){
+    if(meta.end() == (iter = meta.find("Content-type"))){
+      if(meta.end() == (iter = meta.find("content-type"))){
+        iter = meta.find("content-Type");
+      }
+    }
+  }
+  return iter;
+}
+
 //-------------------------------------------------------------------
 // Class S3ObjList
 //-------------------------------------------------------------------
@@ -722,8 +736,13 @@ mode_t get_mode(headers_t& meta, const char* path, bool checkdir, bool forcedir)
         if(forcedir){
           mode |= S_IFDIR;
         }else{
-          if(meta.end() != (iter = meta.find("Content-Type"))){
+          if(meta.end() != (iter = find_content_type(meta))){
             string strConType = (*iter).second;
+            // Leave just the mime type, remove any optional parameters (eg charset)
+            string::size_type pos = strConType.find(";");
+            if(string::npos != pos){
+              strConType = strConType.substr(0, pos);
+            }
             if(strConType == "application/x-directory"){
               mode |= S_IFDIR;
             }else if(path && 0 < strlen(path) && '/' == path[strlen(path) - 1]){
@@ -845,7 +864,7 @@ bool is_need_check_obj_detail(headers_t& meta)
   }
   // if there is not Content-Type, or Content-Type is "x-directory",
   // checking is no more.
-  if(meta.end() == (iter = meta.find("Content-Type"))){
+  if(meta.end() == (iter = find_content_type(meta))){
     return false;
   }
   if("application/x-directory" == (*iter).second){
@@ -954,17 +973,19 @@ void show_help (void)
     "      file is the additional HTTP header by file(object) extension.\n"
     "      The configuration file format is below:\n"
     "      -----------\n"
-    "      line         = [file suffix] HTTP-header [HTTP-values]\n"
+    "      line         = [file suffix or regex] HTTP-header [HTTP-values]\n"
     "      file suffix  = file(object) suffix, if this field is empty,\n"
-    "                     it means \"*\"(all object).\n"
+    "                     it means \"reg:(.*)\".(=all object).\n"
+    "      regex        = regular expression to match the file(object) path.\n"
+    "                     this type starts with \"reg:\" prefix.\n"
     "      HTTP-header  = additional HTTP header name\n"
     "      HTTP-values  = additional HTTP header value\n"
     "      -----------\n"
     "      Sample:\n"
     "      -----------\n"
-    "      .gz      Content-Encoding     gzip\n"
-    "      .Z       Content-Encoding     compress\n"
-    "               X-S3FS-MYHTTPHEAD    myvalue\n"
+    "      .gz                    Content-Encoding  gzip\n"
+    "      .Z                     Content-Encoding  compress\n"
+    "      reg:^/MYDIR/(.*)[.]t2$ Content-Encoding  text2\n"
     "      -----------\n"
     "      A sample configuration file is uploaded in \"test\" directory.\n"
     "      If you specify this option for set \"Content-Encoding\" HTTP \n"
@@ -1017,17 +1038,15 @@ void show_help (void)
     "   multipart_size (default=\"10\")\n"
     "      - part size, in MB, for each multipart request.\n"
     "\n"
+    "   ensure_diskfree (default same multipart_size value)\n"
+    "      - sets MB to ensure disk free space. s3fs makes file for\n"
+    "        downloading, uploading and caching files. If the disk free\n"
+    "        space is smaller than this value, s3fs do not use diskspace\n"
+    "        as possible in exchange for the performance.\n"
+    "\n"
     "   singlepart_copy_limit (default=\"5120\")\n"
     "      - maximum size, in MB, of a single-part copy before trying \n"
     "      multipart copy.\n"
-    "\n"
-    "   fd_page_size (default=\"52428800\"(50MB))\n"
-    "      - number of internal management page size for each file descriptor.\n"
-    "      For delayed reading and writing by s3fs, s3fs manages pages which \n"
-    "      is separated from object. Each pages has a status that data is \n"
-    "      already loaded(or not loaded yet).\n"
-    "      This option should not be changed when you don't have a trouble \n"
-    "      with performance.\n"
     "\n"
     "   url (default=\"http://s3.amazonaws.com\")\n"
     "      - sets the url to use to access amazon s3\n"
@@ -1058,9 +1077,11 @@ void show_help (void)
     "   enable_content_md5 (default is disable)\n"
     "      - ensure data integrity during writes with MD5 hash.\n"
     "\n"
-    "   iam_role (default is no role)\n"
-    "      - set the IAM Role that will supply the credentials from the \n"
-    "      instance meta-data.\n"
+    "   iam_role (default is no IAM role)\n"
+    "      - This option requires the IAM role name or \"auto\". If you specify\n"
+    "      \"auto\", s3fs will automatically use the IAM role names that are set\n"
+    "      to an instance. If you specify this option without any argument, it\n"
+    "      is the same as that you have specified the \"auto\".\n"
     "\n"
     "   noxmlns (disable registering xml name space)\n"
     "        disable registering xml name space for response of \n"
@@ -1089,6 +1110,12 @@ void show_help (void)
     "        Enble compatibility with S3-like APIs which do not support\n"
     "        the virtual-host request style, by using the older path request\n"
     "        style.\n"
+    "\n"
+    "   noua (suppress User-Agent header)\n"
+    "        Usually s3fs outputs of the User-Agent in \"s3fs/<version> (commit\n"
+    "        hash <hash>; <using ssl library name>)\" format.\n"
+    "        If this option is specified, s3fs suppresses the output of the\n"
+    "        User-Agent.\n"
     "\n"
     "   dbglevel (default=\"crit\")\n"
     "        Set the debug message level. set value as crit(critical), err\n"

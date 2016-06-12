@@ -20,7 +20,7 @@
 dnl Process this file with autoconf to produce a configure script.
 
 AC_PREREQ(2.59)
-AC_INIT(s3fs, 1.79)
+AC_INIT(s3fs, 1.80)
 AC_CONFIG_HEADER([config.h])
 
 AC_CANONICAL_SYSTEM
@@ -227,6 +227,33 @@ dnl check functions
 dnl ----------------------------------------------
 dnl malloc_trim function
 AC_CHECK_FUNCS([malloc_trim])
+
+dnl clock_gettime function(osx)
+AC_SEARCH_LIBS([clock_gettime],[rt posix4]) 
+AC_CHECK_FUNCS([clock_gettime])
+
+dnl ----------------------------------------------
+dnl check symbols/macros/enums
+dnl ----------------------------------------------
+dnl PTHREAD_MUTEX_RECURSIVE
+AC_MSG_CHECKING([pthread mutex recursive])
+AC_COMPILE_IFELSE(
+  [AC_LANG_PROGRAM([[#include <pthread.h>]],
+                   [[int i = PTHREAD_MUTEX_RECURSIVE;]])
+  ],
+  [AC_DEFINE(S3FS_MUTEX_RECURSIVE, PTHREAD_MUTEX_RECURSIVE, [Define if you have PTHREAD_MUTEX_RECURSIVE])
+   AC_MSG_RESULT(PTHREAD_MUTEX_RECURSIVE)
+  ],
+  [AC_COMPILE_IFELSE(
+    [AC_LANG_PROGRAM([[#include <pthread.h>]],
+                     [[int i = PTHREAD_MUTEX_RECURSIVE_NP;]])
+    ],
+    [AC_DEFINE(S3FS_MUTEX_RECURSIVE, PTHREAD_MUTEX_RECURSIVE_NP, [Define if you have PTHREAD_MUTEX_RECURSIVE_NP])
+     AC_MSG_RESULT(PTHREAD_MUTEX_RECURSIVE_NP)
+    ],
+    [AC_MSG_ERROR([do not have PTHREAD_MUTEX_RECURSIVE symbol])])
+  ]
+)
 
 dnl ----------------------------------------------
 dnl output files

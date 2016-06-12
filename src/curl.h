@@ -17,8 +17,16 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
+
 #ifndef S3FS_CURL_H_
 #define S3FS_CURL_H_
+
+#include <cassert>
+
+//----------------------------------------------
+// Symbols
+//----------------------------------------------
+#define MIN_MULTIPART_SIZE          5242880           // 5MB
 
 //----------------------------------------------
 // class BodyData
@@ -116,6 +124,35 @@ typedef std::map<CURL*, progress_t> curlprogress_t;
 class S3fsMultiCurl;
 
 //----------------------------------------------
+// class CurlHandlerPool
+//----------------------------------------------
+
+class CurlHandlerPool
+{
+public:
+  CurlHandlerPool(int maxHandlers)
+    : mMaxHandlers(maxHandlers)
+    , mHandlers(NULL)
+    , mIndex(-1)
+  {
+    assert(maxHandlers > 0);
+  }
+
+  bool Init();
+  bool Destroy();
+
+  CURL* GetHandler();
+  void ReturnHandler(CURL* h);
+
+private:
+  int mMaxHandlers;
+
+  pthread_mutex_t mLock;
+  CURL** mHandlers;
+  int mIndex;
+};
+
+//----------------------------------------------
 // class S3fsCurl
 //----------------------------------------------
 typedef std::map<std::string, std::string> iamcredmap_t;
@@ -126,7 +163,7 @@ typedef std::list<sseckeymap_t>            sseckeylist_t;
 enum storage_class_t {
   STANDARD,
   STANDARD_IA,
-  REDUCED_REDUNDANCY,
+  REDUCED_REDUNDANCY
 };
 
 // sse type
@@ -164,13 +201,16 @@ class S3fsCurl
       REQTYPE_COPYMULTIPOST,
       REQTYPE_MULTILIST,
       REQTYPE_IAMCRED,
-      REQTYPE_ABORTMULTIUPLOAD
+      REQTYPE_ABORTMULTIUPLOAD,
+      REQTYPE_IAMROLE
     };
 
     // class variables
     static pthread_mutex_t  curl_handles_lock;
     static pthread_mutex_t  curl_share_lock[SHARE_MUTEX_MAX];
     static bool             is_initglobal_done;
+    static CurlHandlerPool* sCurlPool;
+    static int              sCurlPoolSize;
     static CURLSH*          hCurlShare;
     static bool             is_cert_check;
     static bool             is_dns_cache;
@@ -199,6 +239,7 @@ class S3fsCurl
     static int              max_parallel_cnt;
     static off_t            multipart_size;
     static bool             is_sigv4;
+    static bool             is_ua;             // User-Agent
 
     // variables
     CURL*                hCurl;
@@ -257,9 +298,12 @@ class S3fsCurl
 
     static bool ParseIAMCredentialResponse(const char* response, iamcredmap_t& keyval);
     static bool SetIAMCredentials(const char* response);
+    static bool ParseIAMRoleFromMetaDataResponse(const char* response, std::string& rolename);
+    static bool SetIAMRoleFromMetaData(const char* response);
     static bool LoadEnvSseCKeys(void);
     static bool LoadEnvSseKmsid(void);
     static bool PushbackSseKeys(std::string& onekey);
+    static bool AddUserAgent(CURL* hCurl);
 
     static int CurlDebugFunc(CURL* hcurl, curl_infotype type, char* data, size_t size, void* userptr);
 
@@ -268,15 +312,12 @@ class S3fsCurl
     bool RemakeHandle(void);
     bool ClearInternalData(void);
     void insertV4Headers(const std::string &op, const std::string &path, const std::string &query_string, const std::string &payload_hash);
-    std::string CalcSignatureV2(std::string method, std::string strMD5, std::string content_type, std::string date, std::string resource);
-    std::string CalcSignature(std::string method, std::string canonical_uri, std::string query_string, std::string strdate, std::string payload_hash, std::string date8601);
+    std::string CalcSignatureV2(const std::string& method, const std::string& strMD5, const std::string& content_type, const std::string& date, const std::string& resource);
+    std::string CalcSignature(const std::string& method, const std::string& canonical_uri, const std::string& query_string, const std::string& strdate, const std::string& payload_hash, const std::string& date8601);
     bool GetUploadId(std::string& upload_id);
     int GetIAMCredentials(void);
 
-    int PreMultipartPostRequest(const char* tpath, headers_t& meta, std::string& upload_id, bool is_copy);
-    int CompleteMultipartPostRequest(const char* tpath, std::string& upload_id, etaglist_t& parts);
-    int UploadMultipartPostSetup(const char* tpath, int part_num, std::string& upload_id);
-    int UploadMultipartPostRequest(const char* tpath, int part_num, std::string& upload_id);
+    int UploadMultipartPostSetup(const char* tpath, int part_num, const std::string& upload_id);
     int CopyMultipartPostRequest(const char* from, const char* to, int part_num, std::string& upload_id, headers_t& meta);
 
   public:
@@ -288,7 +329,7 @@ class S3fsCurl
     static bool CheckIAMCredentialUpdate(void);
 
     // class methods(valiables)
-    static std::string LookupMimeType(std::string name);
+    static std::string LookupMimeType(const std::string& name);
     static bool SetCheckCertificate(bool isCertCheck);
     static bool SetDnsCache(bool isCache);
     static bool SetSslSessionCache(bool isCache);
@@ -333,11 +374,14 @@ class S3fsCurl
     static off_t GetMultipartSize(void) { return S3fsCurl::multipart_size; }
     static bool SetSignatureV4(bool isset) { bool bresult = S3fsCurl::is_sigv4; S3fsCurl::is_sigv4 = isset; return bresult; }
     static bool IsSignatureV4(void) { return S3fsCurl::is_sigv4; }
+    static bool SetUserAgentFlag(bool isset) { bool bresult = S3fsCurl::is_ua; S3fsCurl::is_ua = isset; return bresult; }
+    static bool IsUserAgentFlag(void) { return S3fsCurl::is_ua; }
 
     // methods
     bool CreateCurlHandle(bool force = false);
     bool DestroyCurlHandle(void);
 
+    bool LoadIAMRoleFromMetaData(void);
     bool AddSseRequestHead(sse_type_t ssetype, std::string& ssevalue, bool is_only_c, bool is_copy);
     bool GetResponseCode(long& responseCode);
     int RequestPerform(void);
@@ -353,10 +397,14 @@ class S3fsCurl
     int GetObjectRequest(const char* tpath, int fd, off_t start = -1, ssize_t size = -1);
     int CheckBucket(void);
     int ListBucketRequest(const char* tpath, const char* query);
+    int PreMultipartPostRequest(const char* tpath, headers_t& meta, std::string& upload_id, bool is_copy);
+    int CompleteMultipartPostRequest(const char* tpath, std::string& upload_id, etaglist_t& parts);
+    int UploadMultipartPostRequest(const char* tpath, int part_num, const std::string& upload_id);
     int MultipartListRequest(std::string& body);
     int AbortMultipartUpload(const char* tpath, std::string& upload_id);
     int MultipartHeadRequest(const char* tpath, off_t size, headers_t& meta, bool is_copy);
     int MultipartUploadRequest(const char* tpath, headers_t& meta, int fd, bool is_copy);
+    int MultipartUploadRequest(const std::string& upload_id, const char* tpath, int fd, off_t offset, size_t size, etaglist_t& list);
     int MultipartRenameRequest(const char* from, const char* to, headers_t& meta, off_t size);
 
     // methods(valiables)
@@ -417,36 +465,6 @@ class S3fsMultiCurl
     bool Clear(void) { return ClearEx(true); }
     bool SetS3fsCurlObject(S3fsCurl* s3fscurl);
     int Request(void);
-};
-
-//----------------------------------------------
-// class AdditionalHeader
-//----------------------------------------------
-typedef std::list<int> charcnt_list_t;
-typedef std::map<std::string, std::string> headerpair_t;
-typedef std::map<std::string, headerpair_t> addheader_t;
-
-class AdditionalHeader
-{
-  private:
-    static AdditionalHeader singleton;
-    bool                    is_enable;
-    charcnt_list_t          charcntlist;
-    addheader_t             addheader;
-
-  public:
-    // Reference singleton
-    static AdditionalHeader* get(void) { return &singleton; }
-
-    AdditionalHeader();
-    ~AdditionalHeader();
-
-    bool Load(const char* file);
-    void Unload(void);
-
-    bool AddHeader(headers_t& meta, const char* path) const;
-    struct curl_slist* AddHeader(struct curl_slist* list, const char* path) const;
-    bool Dump(void) const;
 };
 
 //----------------------------------------------
