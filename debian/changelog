@@ -1,3 +1,9 @@
+s3fs-fuse (1.80-1~bpo8+1) jessie-backports; urgency=medium
+
+  * Rebuild for jessie-backports.
+
+ -- Mattia Rizzolo <mattia@debian.org>  Tue, 28 Jun 2016 10:35:27 +0000
+
 s3fs-fuse (1.80-1) unstable; urgency=medium
 
   * Import new upstream release 1.80.
