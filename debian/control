@@ -3,8 +3,7 @@ Section: utils
 Priority: optional
 Maintainer: Andriy Senkovych <jolly_roger@itblog.org.ua>
 Uploaders: Mattia Rizzolo <mattia@debian.org>
-Build-Depends: debhelper (>= 9),
-               dh-autoreconf,
+Build-Depends: debhelper (>= 10),
                libcurl4-gnutls-dev,
                libfuse-dev,
                libgcrypt20-dev,
