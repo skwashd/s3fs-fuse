@@ -1,3 +1,10 @@
+s3fs-fuse (1.80-2) unstable; urgency=medium
+
+  * Bump debhelper compat level to 10.
+    Drop explicit '--with autoreconf' option, now default.
+
+ -- Mattia Rizzolo <mattia@debian.org>  Fri, 11 Nov 2016 23:22:57 +0000
+
 s3fs-fuse (1.80-1) unstable; urgency=medium
 
   * Import new upstream release 1.80.
