@@ -1,3 +1,9 @@
+s3fs-fuse (1.80-2~bpo8+1) jessie-backports; urgency=medium
+
+  * Rebuild for jessie-backports.
+
+ -- Mattia Rizzolo <mattia@debian.org>  Sun, 01 Jan 2017 14:42:19 +0100
+
 s3fs-fuse (1.80-2) unstable; urgency=medium
 
   * Bump debhelper compat level to 10.
