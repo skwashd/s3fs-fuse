@@ -1,7 +1,7 @@
 /*
  * s3fs - FUSE-based file system backed by Amazon S3
  *
- * Copyright 2007-2013 Takeshi Nakatani <ggtakec.com>
+ * Copyright(C) 2007 Takeshi Nakatani <ggtakec.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -46,7 +46,7 @@
 using namespace std;
 
 //-------------------------------------------------------------------
-// Global valiables
+// Global variables
 //-------------------------------------------------------------------
 std::string mount_prefix   = "";
 
@@ -58,20 +58,6 @@ string get_realpath(const char *path) {
   realpath += path;
 
   return realpath;
-}
-
-inline headers_t::const_iterator find_content_type(headers_t& meta)
-{
-  headers_t::const_iterator iter;
-
-  if(meta.end() == (iter = meta.find("Content-Type"))){
-    if(meta.end() == (iter = meta.find("Content-type"))){
-      if(meta.end() == (iter = meta.find("content-type"))){
-        iter = meta.find("content-Type");
-      }
-    }
-  }
-  return iter;
 }
 
 //-------------------------------------------------------------------
@@ -124,7 +110,7 @@ bool S3ObjList::insert(const char* name, const char* etag, bool is_dir)
     if(objects.end() != (iter = objects.find(chkname))){
       // found "dir/" object --> not add new object.
       // and add normalization
-      return insert_nomalized(orgname.c_str(), chkname.c_str(), true);
+      return insert_normalized(orgname.c_str(), chkname.c_str(), true);
     }
   }
 
@@ -149,10 +135,10 @@ bool S3ObjList::insert(const char* name, const char* etag, bool is_dir)
   }
 
   // add normalization
-  return insert_nomalized(orgname.c_str(), newname.c_str(), is_dir);
+  return insert_normalized(orgname.c_str(), newname.c_str(), is_dir);
 }
 
-bool S3ObjList::insert_nomalized(const char* name, const char* normalized, bool is_dir)
+bool S3ObjList::insert_normalized(const char* name, const char* normalized, bool is_dir)
 {
   if(!name || '\0' == name[0] || !normalized || '\0' == normalized[0]){
     return false;
@@ -439,14 +425,25 @@ void free_mvnodes(MVNODE *head)
 //-------------------------------------------------------------------
 // Class AutoLock
 //-------------------------------------------------------------------
-AutoLock::AutoLock(pthread_mutex_t* pmutex) : auto_mutex(pmutex)
+AutoLock::AutoLock(pthread_mutex_t* pmutex, bool no_wait) : auto_mutex(pmutex)
 {
-  pthread_mutex_lock(auto_mutex);
+  if (no_wait) {
+    is_lock_acquired = pthread_mutex_trylock(auto_mutex) == 0;
+  } else {
+    is_lock_acquired = pthread_mutex_lock(auto_mutex) == 0;
+  }
+}
+
+bool AutoLock::isLockAcquired() const
+{
+  return is_lock_acquired;
 }
 
 AutoLock::~AutoLock()
 {
-  pthread_mutex_unlock(auto_mutex);
+  if (is_lock_acquired) {
+    pthread_mutex_unlock(auto_mutex);
+  }
 }
 
 //-------------------------------------------------------------------
@@ -455,7 +452,7 @@ AutoLock::~AutoLock()
 // get user name from uid
 string get_username(uid_t uid)
 {
-  static size_t maxlen = 0;	// set onece
+  static size_t maxlen = 0;	// set once
   char* pbuf;
   struct passwd pwinfo;
   struct passwd* ppwinfo = NULL;
@@ -490,9 +487,9 @@ string get_username(uid_t uid)
   return name;
 }
 
-int is_uid_inculde_group(uid_t uid, gid_t gid)
+int is_uid_include_group(uid_t uid, gid_t gid)
 {
-  static size_t maxlen = 0;	// set onece
+  static size_t maxlen = 0;	// set once
   int result;
   char* pbuf;
   struct group ginfo;
@@ -545,6 +542,14 @@ int is_uid_inculde_group(uid_t uid, gid_t gid)
 //-------------------------------------------------------------------
 // safe variant of dirname
 // dirname clobbers path so let it operate on a tmp copy
+string mydirname(const char* path)
+{
+  if(!path || '\0' == path[0]){
+    return string("");
+  }
+  return mydirname(string(path));
+}
+
 string mydirname(string path)
 {
   return string(dirname((char*)path.c_str()));
@@ -552,6 +557,14 @@ string mydirname(string path)
 
 // safe variant of basename
 // basename clobbers path so let it operate on a tmp copy
+string mybasename(const char* path)
+{
+  if(!path || '\0' == path[0]){
+    return string("");
+  }
+  return mybasename(string(path));
+}
+
 string mybasename(string path)
 {
   return string(basename((char*)path.c_str()));
@@ -580,6 +593,28 @@ int mkdirp(const string& path, mode_t mode)
   return 0;
 }
 
+// get existed directory path
+string get_exist_directory_path(const string& path)
+{
+  string       existed("/");    // "/" is existed.
+  string       base;
+  string       component;
+  stringstream ss(path);
+  while (getline(ss, component, '/')) {
+    if(base != "/"){
+      base += "/";
+    }
+    base += component;
+    struct stat st;
+    if(0 == stat(base.c_str(), &st) && S_ISDIR(st.st_mode)){
+      existed = base;
+    }else{
+      break;
+    }
+  }
+  return existed;
+}
+
 bool check_exist_dir_permission(const char* dirpath)
 {
   if(!dirpath || '\0' == dirpath[0]){
@@ -597,7 +632,7 @@ bool check_exist_dir_permission(const char* dirpath)
       // could not access directory
       return false;
     }
-    // somthing error occured
+    // something error occurred
     return false;
   }
 
@@ -614,7 +649,7 @@ bool check_exist_dir_permission(const char* dirpath)
       return false;
     }
   }else{
-    if(1 == is_uid_inculde_group(myuid, st.st_gid)){
+    if(1 == is_uid_include_group(myuid, st.st_gid)){
       if(S_IRWXG != (st.st_mode & S_IRWXG)){
         return false;
       }
@@ -701,8 +736,8 @@ off_t get_size(const char *s)
 
 off_t get_size(headers_t& meta)
 {
-  headers_t::const_iterator iter;
-  if(meta.end() == (iter = meta.find("Content-Length"))){
+  headers_t::const_iterator iter = meta.find("Content-Length");
+  if(meta.end() == iter){
     return 0;
   }
   return get_size((*iter).second.c_str());
@@ -736,7 +771,7 @@ mode_t get_mode(headers_t& meta, const char* path, bool checkdir, bool forcedir)
         if(forcedir){
           mode |= S_IFDIR;
         }else{
-          if(meta.end() != (iter = find_content_type(meta))){
+          if(meta.end() != (iter = meta.find("Content-Type"))){
             string strConType = (*iter).second;
             // Leave just the mime type, remove any optional parameters (eg charset)
             string::size_type pos = strConType.find(";");
@@ -749,7 +784,19 @@ mode_t get_mode(headers_t& meta, const char* path, bool checkdir, bool forcedir)
               if(strConType == "binary/octet-stream" || strConType == "application/octet-stream"){
                 mode |= S_IFDIR;
               }else{
-                mode |= S_IFREG;
+                if(complement_stat){
+                  // If complement lack stat mode, when the object has '/' charactor at end of name
+                  // and content type is text/plain and the object's size is 0 or 1, it should be
+                  // directory.
+                  off_t size = get_size(meta);
+                  if(strConType == "text/plain" && (0 == size || 1 == size)){
+                    mode |= S_IFDIR;
+                  }else{
+                    mode |= S_IFREG;
+                  }
+                }else{
+                  mode |= S_IFREG;
+                }
               }
             }else{
               mode |= S_IFREG;
@@ -758,6 +805,11 @@ mode_t get_mode(headers_t& meta, const char* path, bool checkdir, bool forcedir)
             mode |= S_IFREG;
           }
         }
+      }
+      // If complement lack stat mode, when it's mode is not set any permission,
+      // the object is added minimal mode only for read permission.
+      if(complement_stat && 0 == (mode & (S_IRWXU | S_IRWXG | S_IRWXO))){
+        mode |= (S_IRUSR | (0 == (mode & S_IFDIR) ? 0 : S_IXUSR));
       }
     }else{
       if(!checkdir){
@@ -831,8 +883,8 @@ time_t get_lastmodified(const char* s)
 
 time_t get_lastmodified(headers_t& meta)
 {
-  headers_t::const_iterator iter;
-  if(meta.end() == (iter = meta.find("Last-Modified"))){
+  headers_t::const_iterator iter = meta.find("Last-Modified");
+  if(meta.end() == iter){
     return 0;
   }
   return get_lastmodified((*iter).second.c_str());
@@ -864,7 +916,7 @@ bool is_need_check_obj_detail(headers_t& meta)
   }
   // if there is not Content-Type, or Content-Type is "x-directory",
   // checking is no more.
-  if(meta.end() == (iter = find_content_type(meta))){
+  if(meta.end() == (iter = meta.find("Content-Type"))){
     return false;
   }
   if("application/x-directory" == (*iter).second){
@@ -889,6 +941,17 @@ void show_help (void)
     "\n"
     "Mount an Amazon S3 bucket as a file system.\n"
     "\n"
+    "Usage:\n"
+    "   mounting\n"
+    "     s3fs bucket[:/path] mountpoint [options]\n"
+    "     s3fs mountpoint [options(must specify bucket= option)]\n"
+    "\n"
+    "   umounting\n"
+    "     umount mountpoint\n"
+    "\n"
+    "   utility mode (remove interrupted multipart uploading objects)\n"
+    "     s3fs -u bucket\n"
+    "\n"
     "   General forms for s3fs and FUSE/mount options:\n"
     "      -o opt[,opt...]\n"
     "      -o opt [-o opt] ...\n"
@@ -899,16 +962,26 @@ void show_help (void)
     "\n"
     "             <option_name>=<option_value>\n"
     "\n"
+    "   bucket\n"
+    "      - if it is not specified bucket name(and path) in command line,\n"
+    "        must specify this option after -o option for bucket name.\n"
+    "\n"
     "   default_acl (default=\"private\")\n"
-    "     - the default canned acl to apply to all written s3 objects\n"
-    "          see http://aws.amazon.com/documentation/s3/ for the \n"
-    "          full list of canned acls\n"
+    "      - the default canned acl to apply to all written s3 objects,\n"
+    "        e.g., private, public-read.  empty string means do not send\n"
+    "        header.  see http://aws.amazon.com/documentation/s3/ for the\n"
+    "        full list of canned acls\n"
     "\n"
     "   retries (default=\"2\")\n"
     "      - number of times to retry a failed s3 transaction\n"
     "\n"
     "   use_cache (default=\"\" which means disabled)\n"
     "      - local folder to use for local file cache\n"
+    "\n"
+    "   check_cache_dir_exist (default is disable)\n"
+    "      - if use_cache is set, check if the cache directory exists.\n"
+    "        if this option is not specified, it will be created at runtime\n"
+    "        when the cache directory does not exist.\n"
     "\n"
     "   del_cache (delete local file cache)\n"
     "      - delete local file cache when s3fs starts and exits.\n"
@@ -942,7 +1015,7 @@ void show_help (void)
     "        with \":\" separator.) This option is used to decide the\n"
     "        SSE type. So that if you do not want to encrypt a object\n"
     "        object at uploading, but you need to decrypt encrypted\n"
-    "        object at downloaing, you can use load_sse_c option instead\n"
+    "        object at downloading, you can use load_sse_c option instead\n"
     "        of this option.\n"
     "        For setting SSE-KMS, specify \"use_sse=kmsid\" or\n"
     "        \"use_sse=kmsid:<kms id>\". You can use \"k\" for short \"kmsid\".\n"
@@ -954,16 +1027,20 @@ void show_help (void)
     "        region.\n"
     "\n"
     "   load_sse_c - specify SSE-C keys\n"
-    "        Specify the custom-provided encription keys file path for decrypting\n"
-    "        at duwnloading.\n"
-    "        If you use the custom-provided encription key at uploading, you\n"
+    "        Specify the custom-provided encryption keys file path for decrypting\n"
+    "        at downloading.\n"
+    "        If you use the custom-provided encryption key at uploading, you\n"
     "        specify with \"use_sse=custom\". The file has many lines, one line\n"
     "        means one custom key. So that you can keep all SSE-C keys in file,\n"
     "        that is SSE-C key history. AWSSSECKEYS environment is as same as this\n"
     "        file contents.\n"
     "\n"
     "   public_bucket (default=\"\" which means disabled)\n"
-    "      - anonymously mount a public bucket when set to 1\n"
+    "      - anonymously mount a public bucket when set to 1, ignores the \n"
+    "        $HOME/.passwd-s3fs and /etc/passwd-s3fs files.\n"
+    "        S3 does not allow copy object api for anonymous users, then\n"
+    "        s3fs sets nocopyapi option automatically when public_bucket=1\n"
+    "        option is specified.\n"
     "\n"
     "   passwd_file (default=\"\")\n"
     "      - specify which s3fs password file to use\n"
@@ -1002,6 +1079,7 @@ void show_help (void)
     "\n"
     "   stat_cache_expire (default is no expire)\n"
     "      - specify expire time(seconds) for entries in the stat cache.\n"
+    "        This expire time indicates the time since stat cached.\n"
     "\n"
     "   enable_noobj_cache (default is disable)\n"
     "      - enable cache entries for the object which does not exist.\n"
@@ -1048,8 +1126,11 @@ void show_help (void)
     "      - maximum size, in MB, of a single-part copy before trying \n"
     "      multipart copy.\n"
     "\n"
-    "   url (default=\"http://s3.amazonaws.com\")\n"
-    "      - sets the url to use to access amazon s3\n"
+    "   url (default=\"https://s3.amazonaws.com\")\n"
+    "      - sets the url to use to access Amazon S3. If you want to use HTTP,\n"
+    "        then you can set \"url=http://s3.amazonaws.com\".\n"
+    "        If you do not use https, please specify the URL with the url\n"
+    "        option.\n"
     "\n"
     "   endpoint (default=\"us-east-1\")\n"
     "      - sets the endpoint to use on signature version 4\n"
@@ -1083,6 +1164,13 @@ void show_help (void)
     "      to an instance. If you specify this option without any argument, it\n"
     "      is the same as that you have specified the \"auto\".\n"
     "\n"
+    "   use_xattr (default is not handling the extended attribute)\n"
+    "      Enable to handle the extended attribute(xattrs).\n"
+    "      If you set this option, you can use the extended attribute.\n"
+    "      For example, encfs and ecryptfs need to support the extended attribute.\n"
+    "      Notice: if s3fs handles the extended attribute, s3fs can not work to\n"
+    "      copy command with preserve=mode.\n"
+    "\n"
     "   noxmlns (disable registering xml name space)\n"
     "        disable registering xml name space for response of \n"
     "        ListBucketResult and ListVersionsResult etc. Default name \n"
@@ -1107,7 +1195,7 @@ void show_help (void)
     "        nocopyapi, then s3fs ignores it.\n"
     "\n"
     "   use_path_request_style (use legacy API calling style)\n"
-    "        Enble compatibility with S3-like APIs which do not support\n"
+    "        Enable compatibility with S3-like APIs which do not support\n"
     "        the virtual-host request style, by using the older path request\n"
     "        style.\n"
     "\n"
@@ -1127,6 +1215,38 @@ void show_help (void)
     "   curldbg - put curl debug message\n"
     "        Put the debug message from libcurl when this option is specified.\n"
     "\n"
+    "   cipher_suites - customize TLS cipher suite list\n"
+    "        Customize the list of TLS cipher suites.\n"
+    "        Expects a colon separated list of cipher suite names.\n"
+    "        A list of available cipher suites, depending on your TLS engine,\n"
+    "        can be found on the CURL library documentation:\n"
+    "        https://curl.haxx.se/docs/ssl-ciphers.html\n"
+    "\n"
+    "   complement_stat (complement lack of file/directory mode)\n"
+    "        s3fs complements lack of information about file/directory mode\n"
+    "        if a file or a directory object does not have x-amz-meta-mode\n"
+    "        header. As default, s3fs does not complements stat information\n"
+    "        for a object, then the object will not be able to be allowed to\n"
+    "        list/modify.\n"
+    "\n"
+    "   notsup_compat_dir (not support compatibility directory types)\n"
+    "        As a default, s3fs supports objects of the directory type as\n"
+    "        much as possible and recognizes them as directories.\n"
+    "        Objects that can be recognized as directory objects are \"dir/\",\n"
+    "        \"dir\", \"dir_$folder$\", and there is a file object that does\n"
+    "        not have a directory object but contains that directory path.\n"
+    "        s3fs needs redundant communication to support all these\n"
+    "        directory types. The object as the directory created by s3fs\n"
+    "        is \"dir/\". By restricting s3fs to recognize only \"dir/\" as\n"
+    "        a directory, communication traffic can be reduced. This option\n"
+    "        is used to give this restriction to s3fs.\n"
+    "        However, if there is a directory object other than \"dir/\" in\n"
+    "        the bucket, specifying this option is not recommended. s3fs may\n"
+    "        not be able to recognize the object correctly if an object\n"
+    "        created by s3fs exists in the bucket.\n"
+    "        Please use this option when the directory in the bucket is\n"
+    "        only \"dir/\" object.\n"
+    "\n"
     "FUSE/mount Options:\n"
     "\n"
     "   Most of the generic mount options described in 'man mount' are\n"
@@ -1145,7 +1265,7 @@ void show_help (void)
     " -d  --debug       Turn on DEBUG messages to syslog. Specifying -d\n"
     "                   twice turns on FUSE debug messages to STDOUT.\n"
     " -f                FUSE foreground option - do not run as daemon.\n"
-    " -s                FUSE singlethread option\n"
+    " -s                FUSE singlethreaded option\n"
     "                   disable multi-threaded operation\n"
     "\n"
     "\n"

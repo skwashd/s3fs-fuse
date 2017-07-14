@@ -42,7 +42,7 @@ function test_truncate_file {
 }
 
 function test_truncate_empty_file {
-    echo "Testing truncate empty file ..."
+    describe "Testing truncate empty file ..."
     # Write an empty test file
     touch ${TEST_TEXT_FILE}
 
@@ -207,8 +207,13 @@ function test_chown {
     # if they're the same, we have a problem.
     if [ $(stat --format=%u:%g $TEST_TEXT_FILE) == $ORIGINAL_PERMISSIONS ]
     then
-      echo "Could not modify $TEST_TEXT_FILE ownership"
-      return 1
+      if [ $ORIGINAL_PERMISSIONS == "1000:1000" ]
+      then
+        echo "Could not be strict check because original file permission 1000:1000"
+      else
+        echo "Could not modify $TEST_TEXT_FILE ownership($ORIGINAL_PERMISSIONS to 1000:1000)"
+        return 1
+      fi
     fi
 
     # clean up
@@ -407,11 +412,11 @@ function add_all_tests {
     # TODO: broken: https://github.com/s3fs-fuse/s3fs-fuse/issues/145
     #add_tests test_rename_before_close
     add_tests test_multipart_upload
-    # TODO: test disabled until S3Proxy 1.5.0 is released
-    #add_tests test_multipart_copy
+    add_tests test_multipart_copy
     add_tests test_special_characters
     add_tests test_symlink
     add_tests test_extended_attributes
+    add_tests test_mtime_file
     add_tests test_rm_rf_dir
     add_tests test_write_after_seek_ahead
 }

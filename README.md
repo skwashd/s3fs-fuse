@@ -33,7 +33,7 @@ sudo apt-get install automake autotools-dev g++ git libcurl4-gnutls-dev libfuse-
 On CentOS 7:
 
 ```
-sudo yum install automake fuse-devel gcc-c++ git libcurl-devel libxml2-devel make openssl-devel
+sudo yum install automake fuse fuse-devel gcc-c++ git libcurl-devel libxml2-devel make openssl-devel
 ```
 
 Compile from master via the following commands:
@@ -88,7 +88,7 @@ Note: You may also want to create the global credential file first
 
 ```
 echo MYIDENTITY:MYCREDENTIAL > /etc/passwd-s3fs
-chmod 600 /path/to/passwd
+chmod 600 /etc/passwd-s3fs
 ```
 
 Note2: You may also need to make sure `netfs` service is start on boot
@@ -101,7 +101,7 @@ Generally S3 cannot offer the same performance or semantics as a local file syst
 
 * random writes or appends to files require rewriting the entire file
 * metadata operations such as listing directories have poor performance due to network latency
-* [eventual consistency](https://en.wikipedia.org/wiki/Eventual_consistency) can temporarily yield stale data
+* [eventual consistency](https://en.wikipedia.org/wiki/Eventual_consistency) can temporarily yield stale data([Amazon S3 Data Consistency Model](http://docs.aws.amazon.com/AmazonS3/latest/dev/Introduction.html#ConsistencyModel))
 * no atomic renames of files or directories
 * no coordination between multiple clients mounting the same bucket
 * no hard links

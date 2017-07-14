@@ -1,7 +1,7 @@
 /*
  * s3fs - FUSE-based file system backed by Amazon S3
  *
- * Copyright 2007-2008 Randy Rizun <rrizun@gmail.com>
+ * Copyright(C) 2007 Randy Rizun <rrizun@gmail.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -56,8 +56,13 @@ using namespace std;
 #define CLOCK_MONOTONIC_COARSE  CLOCK_MONOTONIC
 #endif
 
-#ifndef HAVE_CLOCK_GETTIME
-static int clock_gettime(int clk_id, struct timespec* ts)
+#ifdef HAVE_CLOCK_GETTIME
+static int s3fs_clock_gettime(int clk_id, struct timespec* ts)
+{
+  return clock_gettime(clk_id, ts);
+}
+#else
+static int s3fs_clock_gettime(int clk_id, struct timespec* ts)
 {
   struct timeval now;
   if(0 != gettimeofday(&now, NULL)){
@@ -71,7 +76,7 @@ static int clock_gettime(int clk_id, struct timespec* ts)
 
 inline void SetStatCacheTime(struct timespec& ts)
 {
-  if(-1 == clock_gettime(CLOCK_MONOTONIC_COARSE, &ts)){
+  if(-1 == s3fs_clock_gettime(CLOCK_MONOTONIC_COARSE, &ts)){
     ts.tv_sec  = time(NULL);
     ts.tv_nsec = 0;
   }
@@ -137,7 +142,7 @@ pthread_mutex_t StatCache::stat_cache_lock;
 //-------------------------------------------------------------------
 // Constructor/Destructor
 //-------------------------------------------------------------------
-StatCache::StatCache() : IsExpireTime(false), ExpireTime(0), CacheSize(1000), IsCacheNoObject(false)
+StatCache::StatCache() : IsExpireTime(false), IsExpireIntervalType(false), ExpireTime(0), CacheSize(1000), IsCacheNoObject(false)
 {
   if(this == StatCache::getStatCacheData()){
     stat_cache.clear();
@@ -177,19 +182,21 @@ time_t StatCache::GetExpireTime(void) const
   return (IsExpireTime ? ExpireTime : (-1));
 }
 
-time_t StatCache::SetExpireTime(time_t expire)
+time_t StatCache::SetExpireTime(time_t expire, bool is_interval)
 {
-  time_t old   = ExpireTime;
-  ExpireTime   = expire;
-  IsExpireTime = true;
+  time_t old           = ExpireTime;
+  ExpireTime           = expire;
+  IsExpireTime         = true;
+  IsExpireIntervalType = is_interval;
   return old;
 }
 
 time_t StatCache::UnsetExpireTime(void)
 {
-  time_t old   = IsExpireTime ? ExpireTime : (-1);
-  ExpireTime   = 0;
-  IsExpireTime = false;
+  time_t old           = IsExpireTime ? ExpireTime : (-1);
+  ExpireTime           = 0;
+  IsExpireTime         = false;
+  IsExpireIntervalType = false;
   return old;
 }
 
@@ -278,7 +285,10 @@ bool StatCache::GetStat(string& key, struct stat* pst, headers_t* meta, bool ove
           (*pisforce) = ent->isforce;
         }
         ent->hit_count++;
-        SetStatCacheTime(ent->cache_date);
+
+        if(IsExpireIntervalType){
+          SetStatCacheTime(ent->cache_date);
+        }
         pthread_mutex_unlock(&StatCache::stat_cache_lock);
         return true;
       }
@@ -495,7 +505,10 @@ bool StatCache::TruncateCache(void)
   if(IsExpireTime){
     for(stat_cache_t::iterator iter = stat_cache.begin(); iter != stat_cache.end(); ){
       stat_cache_entry* entry = iter->second;
-      if(!entry || (0L < entry->notruncate && IsExpireStatCacheTime(entry->cache_date, ExpireTime))){
+      if(!entry || (0L == entry->notruncate && IsExpireStatCacheTime(entry->cache_date, ExpireTime))){
+        if(entry){
+            delete entry;
+        }
         stat_cache.erase(iter++);
       }else{
         ++iter;
@@ -532,6 +545,9 @@ bool StatCache::TruncateCache(void)
     stat_cache_t::iterator siter = *iiter;
 
     S3FS_PRN_DBG("truncate stat cache[path=%s]", siter->first.c_str());
+    if(siter->second){
+        delete siter->second;
+    }
     stat_cache.erase(siter);
   }
   S3FS_MALLOCTRIM(0);
