@@ -1,7 +1,7 @@
 /*
  * s3fs - FUSE-based file system backed by Amazon S3
  *
- * Copyright 2007-2008 Randy Rizun <rrizun@gmail.com>
+ * Copyright(C) 2007 Randy Rizun <rrizun@gmail.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -85,7 +85,7 @@ bool s3fs_destroy_crypt_mutex(void)
 //-------------------------------------------------------------------
 static bool s3fs_HMAC_RAW(const void* key, size_t keylen, const unsigned char* data, size_t datalen, unsigned char** digest, unsigned int* digestlen, bool is_sha256)
 {
-  if(!key || 0 >= keylen || !data || 0 >= datalen || !digest || !digestlen){
+  if(!key || !data || !digest || !digestlen){
     return false;
   }
 

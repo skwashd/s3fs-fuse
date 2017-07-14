@@ -5,9 +5,15 @@ S3FS \- FUSE-based file system backed by Amazon S3
 .SS mounting
 .TP
 \fBs3fs bucket[:/path] mountpoint \fP [options]
+.TP
+\fBs3fs mountpoint \fP [options(must specify bucket= option)]
 .SS unmounting
 .TP
 \fBumount mountpoint
+For root.
+.TP
+\fBfusermount -u mountpoint
+For unprivileged user.
 .SS utility mode ( remove interrupted multipart uploading objects )
 .TP
 \fBs3fs \-u bucket
@@ -48,16 +54,23 @@ FUSE singlethreaded option (disables multi-threaded operation)
 All s3fs options must given in the form where "opt" is:
  <option_name>=<option_value>
 .TP
+\fB\-o\fR bucket
+if it is not specified bucket name(and path) in command line, must specify this option after \-o option for bucket name.
+.TP
 \fB\-o\fR default_acl (default="private")
-the default canned acl to apply to all written S3 objects, e.g., "public-read".
-Any created files will have this canned acl.
-Any updated files will also have this canned acl applied!
+the default canned acl to apply to all written s3 objects, e.g., "private", "public-read".
+empty string means do not send header.
+see http://aws.amazon.com/documentation/s3/ for the full list of canned acls.
 .TP
 \fB\-o\fR retries (default="2")
 number of times to retry a failed S3 transaction.
 .TP
 \fB\-o\fR use_cache (default="" which means disabled)
 local folder to use for local file cache.
+.TP
+\fB\-o\fR check_cache_dir_exist (default is disable)
+If use_cache is set, check if the cache directory exists.
+If this option is not specified, it will be created at runtime when the cache directory does not exist.
 .TP
 \fB\-o\fR del_cache - delete local file cache
 delete local file cache when s3fs starts and exits.
@@ -84,7 +97,7 @@ If there are some keys after first line, those are used downloading object which
 So that, you can keep all SSE-C keys in file, that is SSE-C key history.
 If you specify "custom"("c") without file path, you need to set custom key by load_sse_c option or AWSSSECKEYS environment.(AWSSSECKEYS environment has some SSE-C keys with ":" separator.)
 This option is used to decide the SSE type.
-So that if you do not want to encrypt a object at uploading, but you need to decrypt encrypted object at downloaing, you can use load_sse_c option instead of this option.
+So that if you do not want to encrypt a object at uploading, but you need to decrypt encrypted object at downloading, you can use load_sse_c option instead of this option.
 For setting SSE-KMS, specify "use_sse=kmsid" or "use_sse=kmsid:<kms id>".
 You can use "k" for short "kmsid".
 If you san specify SSE-KMS type with your <kms id> in AWS KMS, you can set it after "kmsid:"(or "k:").
@@ -122,6 +135,7 @@ If you specify this option for set "Content-Encoding" HTTP header, please take c
 .TP
 \fB\-o\fR public_bucket (default="" which means disabled)
 anonymously mount a public bucket when set to 1, ignores the $HOME/.passwd-s3fs and /etc/passwd-s3fs files.
+S3 does not allow copy object api for anonymous users, then s3fs sets nocopyapi option automatically when public_bucket=1 option is specified.
 .TP
 \fB\-o\fR connect_timeout (default="300" seconds)
 time to wait for connection before giving up.
@@ -133,7 +147,11 @@ time to wait between read/write activity before giving up.
 maximum number of entries in the stat cache
 .TP
 \fB\-o\fR stat_cache_expire (default is no expire)
-specify expire time(seconds) for entries in the stat cache
+specify expire time(seconds) for entries in the stat cache. This expire time indicates the time since stat cached.
+.TP
+\fB\-o\fR stat_cache_interval_expire (default is no expire)
+specify expire time(seconds) for entries in the stat cache. This expire time is based on the time from the last access time of the stat cache.
+This option is exclusive with stat_cache_expire, and is left for compatibility with older versions.
 .TP
 \fB\-o\fR enable_noobj_cache (default is disable)
 enable cache entries for the object which does not exist.
@@ -170,8 +188,9 @@ sets MB to ensure disk free space. This option means the threshold of free space
 s3fs makes file for downloading, and uploading and caching files.
 If the disk free space is smaller than this value, s3fs do not use diskspace as possible in exchange for the performance.
 .TP
-\fB\-o\fR url (default="http://s3.amazonaws.com")
-sets the url to use to access Amazon S3. If you want to use HTTPS, then you can set url=https://s3.amazonaws.com
+\fB\-o\fR url (default="https://s3.amazonaws.com")
+sets the url to use to access Amazon S3. If you want to use HTTP, then you can set "url=http://s3.amazonaws.com".
+If you do not use https, please specify the URL with the url option.
 .TP
 \fB\-o\fR endpoint (default="us-east-1")
 sets the endpoint to use.
@@ -187,7 +206,7 @@ sets signing AWS requests by sing Signature Version 2.
 sets umask for the mount point directory.
 If allow_other option is not set, s3fs allows access to the mount point only to the owner.
 In the opposite case s3fs allows access to all users as the default.
-But if you set the allow_other with this option, you can controll the permission permissions of the mount point by this option like umask.
+But if you set the allow_other with this option, you can control permissions of the mount point by this option like umask.
 .TP
 \fB\-o\fR nomultipart - disable multipart uploads
 .TP
@@ -200,8 +219,14 @@ Because s3fs always checks MD5 when uploading large object, this option does not
 \fB\-o\fR iam_role ( default is no IAM role )
 This option requires the IAM role name or "auto". If you specify "auto", s3fs will automatically use the IAM role names that are set to an instance. If you specify this option without any argument, it is the same as that you have specified the "auto".
 .TP
-\fB\-o\fR noxmlns - disable registing xml name space.
-disable registing xml name space for response of ListBucketResult and ListVersionsResult etc. Default name space is looked up from "http://s3.amazonaws.com/doc/2006-03-01".
+\fB\-o\fR use_xattr ( default is not handling the extended attribute )
+Enable to handle the extended attribute(xattrs).
+If you set this option, you can use the extended attribute.
+For example, encfs and ecryptfs need to support the extended attribute.
+Notice: if s3fs handles the extended attribute, s3fs can not work to copy command with preserve=mode.
+.TP
+\fB\-o\fR noxmlns - disable registering xml name space.
+disable registering xml name space for response of ListBucketResult and ListVersionsResult etc. Default name space is looked up from "http://s3.amazonaws.com/doc/2006-03-01".
 This option should not be specified now, because s3fs looks up xmlns automatically after v1.66.
 .TP
 \fB\-o\fR nocopyapi - for other incomplete compatibility object storage.
@@ -211,14 +236,34 @@ If you set this option, s3fs do not use PUT with "x-amz-copy-source"(copy api). 
 \fB\-o\fR norenameapi - for other incomplete compatibility object storage.
 For a distributed object storage which is compatibility S3 API without PUT(copy api).
 This option is a subset of nocopyapi option. The nocopyapi option does not use copy-api for all command(ex. chmod, chown, touch, mv, etc), but this option does not use copy-api for only rename command(ex. mv).
-If this option is specified with nocopapi, the s3fs ignores it.
+If this option is specified with nocopyapi, then s3fs ignores it.
 .TP
 \fB\-o\fR use_path_request_style (use legacy API calling style)
-Enble compatibility with S3-like APIs which do not support the virtual-host request style, by using the older path request style.
+Enable compatibility with S3-like APIs which do not support the virtual-host request style, by using the older path request style.
 .TP
 \fB\-o\fR noua (suppress User-Agent header)
 Usually s3fs outputs of the User-Agent in "s3fs/<version> (commit hash <hash>; <using ssl library name>)" format.
 If this option is specified, s3fs suppresses the output of the User-Agent.
+.TP
+\fB\-o\fR cipher_suites
+Customize TLS cipher suite list. Expects a colon separated list of cipher suite names.
+A list of available cipher suites, depending on your TLS engine, can be found on the CURL library documentation:
+https://curl.haxx.se/docs/ssl-ciphers.html
+.TP
+\fB\-o\fR complement_stat (complement lack of file/directory mode)
+s3fs complements lack of information about file/directory mode if a file or a directory object does not have x-amz-meta-mode header.
+As default, s3fs does not complements stat information for a object, then the object will not be able to be allowed to list/modify.
+.TP
+\fB\-o\fR notsup_compat_dir (not support compatibility directory types)
+As a default, s3fs supports objects of the directory type as much as possible and recognizes them as directories.
+Objects that can be recognized as directory objects are "dir/", "dir", "dir_$folder$", and there is a file object that does not have a directory object but contains that directory path.
+s3fs needs redundant communication to support all these directory types.
+The object as the directory created by s3fs is "dir/".
+By restricting s3fs to recognize only "dir/" as a directory, communication traffic can be reduced.
+This option is used to give this restriction to s3fs.
+However, if there is a directory object other than "dir/" in the bucket, specifying this option is not recommended.
+s3fs may not be able to recognize the object correctly if an object created by s3fs exists in the bucket.
+Please use this option when the directory in the bucket is only "dir/" object.
 .TP
 \fB\-o\fR dbglevel (default="crit")
 Set the debug message level. set value as crit(critical), err(error), warn(warning), info(information) to debug level. default debug level is critical.
@@ -234,7 +279,7 @@ Most of the generic mount options described in 'man mount' are supported (ro, rw
 There are many FUSE specific mount options that can be specified. e.g. allow_other. See the FUSE README for the full set.
 .SH NOTES
 .TP
-Maximum file size=64GB (limited by s3fs, not Amazon).
+The maximum size of objects that s3fs can handle depends on Amazone S3. For example, up to 5 GB when using single PUT API. And up to 5 TB is supported when Multipart Upload API is used.
 .TP
 If enabled via the "use_cache" option, s3fs automatically maintains a local cache of files in the folder specified by use_cache. Whenever s3fs needs to read or write a file on S3, it first downloads the entire file locally to the folder specified by use_cache and operates on it. When fuse_release() is called, s3fs will re-upload the file to S3 if it has been changed. s3fs uses md5 checksums to minimize downloads from S3.
 .TP
