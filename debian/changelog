@@ -4,6 +4,9 @@ s3fs-fuse (1.82-1) unstable; urgency=medium
   * Import new upstream release 1.82.
   * gbp.conf: update tagging rules.
 
+  [ Mattia Rizzolo ]
+  * Bump Standards-Version to 4.1.1, no changes needed.
+
  -- Andriy Senkovych <jolly_roger@itblog.org.ua>  Fri, 14 Jul 2017 20:13:18 +0300
 
 s3fs-fuse (1.80-2) unstable; urgency=medium
