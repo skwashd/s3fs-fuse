@@ -37,7 +37,7 @@
 //
 // Macro
 //
-#define SAFESTRPTR(strptr) (strptr ? strptr : "")
+static inline const char *SAFESTRPTR(const char *strptr) { return strptr ? strptr : ""; }
 
 //
 // Debug level
@@ -98,6 +98,14 @@ enum s3fs_log_level{
        }else{ \
          fprintf(stderr, "s3fs: " fmt "%s\n", __VA_ARGS__); \
          syslog(S3FS_LOG_LEVEL_TO_SYSLOG(S3FS_LOG_CRIT), "s3fs: " fmt "%s", __VA_ARGS__); \
+       }
+
+// Special macro for init message
+#define S3FS_PRN_INIT_INFO(fmt, ...) \
+       if(foreground){ \
+         fprintf(stdout, "%s%s%s:%s(%d): " fmt "%s\n", S3FS_LOG_LEVEL_STRING(S3FS_LOG_INFO), S3FS_LOG_NEST(0), __FILE__, __func__, __LINE__, __VA_ARGS__, ""); \
+       }else{ \
+         syslog(S3FS_LOG_LEVEL_TO_SYSLOG(S3FS_LOG_INFO), "%s" fmt "%s", S3FS_LOG_NEST(0), __VA_ARGS__, ""); \
        }
 
 // [NOTE]

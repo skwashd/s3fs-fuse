@@ -26,7 +26,7 @@
 //----------------------------------------------
 // Symbols
 //----------------------------------------------
-#define MIN_MULTIPART_SIZE          5242880           // 5MB
+static const int MIN_MULTIPART_SIZE = 5 * 1024 * 1024;
 
 //----------------------------------------------
 // class BodyData
@@ -175,9 +175,11 @@ enum sse_type_t {
 };
 
 // share
-#define	SHARE_MUTEX_DNS         0
-#define	SHARE_MUTEX_SSL_SESSION 1
-#define	SHARE_MUTEX_MAX         2
+enum {
+  SHARE_MUTEX_DNS = 0,
+  SHARE_MUTEX_SSL_SESSION = 1,
+  SHARE_MUTEX_MAX = 2,
+};
 
 // Class for lapping curl
 //
@@ -230,12 +232,19 @@ class S3fsCurl
     static std::string      AWSSecretAccessKey;
     static std::string      AWSAccessToken;
     static time_t           AWSAccessTokenExpire;
+    static bool             is_ecs;
+    static bool             is_ibm_iam_auth;
+    static std::string      IAM_cred_url;
+    static size_t           IAM_field_count;
+    static std::string      IAM_token_field;
+    static std::string      IAM_expiry_field;
     static std::string      IAM_role;
     static long             ssl_verify_hostname;
     static curltime_t       curl_times;
     static curlprogress_t   curl_progress;
     static std::string      curl_ca_bundle;
     static mimes_t          mimeTypes;
+    static std::string      userAgent;
     static int              max_parallel_cnt;
     static off_t            multipart_size;
     static bool             is_sigv4;
@@ -266,6 +275,8 @@ class S3fsCurl
     int                  b_ssekey_pos;         // backup for retrying
     std::string          b_ssevalue;           // backup for retrying
     sse_type_t           b_ssetype;            // backup for retrying
+    std::string          op;                   // the HTTP verb of the request ("PUT", "GET", etc.)
+    std::string          query_string;         // request query string
 
   public:
     // constructor/destructor
@@ -311,7 +322,10 @@ class S3fsCurl
     bool ResetHandle(void);
     bool RemakeHandle(void);
     bool ClearInternalData(void);
-    void insertV4Headers(const std::string &op, const std::string &path, const std::string &query_string, const std::string &payload_hash);
+    void insertV4Headers();
+    void insertV2Headers();
+    void insertIBMIAMHeaders();
+    void insertAuthHeaders();
     std::string CalcSignatureV2(const std::string& method, const std::string& strMD5, const std::string& content_type, const std::string& date, const std::string& resource);
     std::string CalcSignature(const std::string& method, const std::string& canonical_uri, const std::string& query_string, const std::string& strdate, const std::string& payload_hash, const std::string& date8601);
     bool GetUploadId(std::string& upload_id);
@@ -341,6 +355,7 @@ class S3fsCurl
     static bool SetPublicBucket(bool flag);
     static bool IsPublicBucket(void) { return S3fsCurl::is_public_bucket; }
     static std::string SetDefaultAcl(const char* acl);
+    static std::string GetDefaultAcl();
     static storage_class_t SetStorageClass(storage_class_t storage_class);
     static storage_class_t GetStorageClass() { return S3fsCurl::storage_class; }
     static bool LoadEnvSse(void) { return (S3fsCurl::LoadEnvSseCKeys() && S3fsCurl::LoadEnvSseKmsid()); }
@@ -362,13 +377,22 @@ class S3fsCurl
     static bool SetVerbose(bool flag);
     static bool GetVerbose(void) { return S3fsCurl::is_verbose; }
     static bool SetAccessKey(const char* AccessKeyId, const char* SecretAccessKey);
-    static bool IsSetAccessKeyId(void){
-                  return (0 < S3fsCurl::IAM_role.size() || (0 < S3fsCurl::AWSAccessKeyId.size() && 0 < S3fsCurl::AWSSecretAccessKey.size()));
+    static bool IsSetAccessKeyID(void){
+                  return (0 < S3fsCurl::AWSAccessKeyId.size());
+                }
+    static bool IsSetAccessKeys(void){
+                  return (0 < S3fsCurl::IAM_role.size() || ((0 < S3fsCurl::AWSAccessKeyId.size() || S3fsCurl::is_ibm_iam_auth) && 0 < S3fsCurl::AWSSecretAccessKey.size()));
                 }
     static long SetSslVerifyHostname(long value);
     static long GetSslVerifyHostname(void) { return S3fsCurl::ssl_verify_hostname; }
     static int SetMaxParallelCount(int value);
     static int GetMaxParallelCount(void) { return S3fsCurl::max_parallel_cnt; }
+    static bool SetIsECS(bool flag);
+    static bool SetIsIBMIAMAuth(bool flag);
+    static size_t SetIAMFieldCount(size_t field_count);
+    static std::string SetIAMCredentialsURL(const char* url);
+    static std::string SetIAMTokenField(const char* token_field);
+    static std::string SetIAMExpiryField(const char* expiry_field);
     static std::string SetIAMRole(const char* role);
     static const char* GetIAMRole(void) { return S3fsCurl::IAM_role.c_str(); }
     static bool SetMultipartSize(off_t size);
@@ -377,6 +401,7 @@ class S3fsCurl
     static bool IsSignatureV4(void) { return S3fsCurl::is_sigv4; }
     static bool SetUserAgentFlag(bool isset) { bool bresult = S3fsCurl::is_ua; S3fsCurl::is_ua = isset; return bresult; }
     static bool IsUserAgentFlag(void) { return S3fsCurl::is_ua; }
+    static void InitUserAgent(void);
 
     // methods
     bool CreateCurlHandle(bool force = false);
@@ -479,6 +504,7 @@ struct curl_slist* curl_slist_sort_insert(struct curl_slist* list, const char* d
 struct curl_slist* curl_slist_sort_insert(struct curl_slist* list, const char* key, const char* value);
 std::string get_sorted_header_keys(const struct curl_slist* list);
 std::string get_canonical_headers(const struct curl_slist* list, bool only_amz = false);
+std::string get_header_value(const struct curl_slist* list, const std::string &key);
 bool MakeUrlResource(const char* realpath, std::string& resourcepath, std::string& url);
 std::string prepare_url(const char* url);
 bool get_object_sse_type(const char* path, sse_type_t& ssetype, std::string& ssevalue);   // implement in s3fs.cpp

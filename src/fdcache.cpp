@@ -52,7 +52,7 @@ using namespace std;
 //------------------------------------------------
 // Symbols
 //------------------------------------------------
-#define MAX_MULTIPART_CNT   10000                   // S3 multipart max count
+static const int MAX_MULTIPART_CNT = 10 * 1000;  // S3 multipart max count
 
 //
 // For cache directory top path
@@ -756,20 +756,24 @@ int FdEntity::OpenMirrorFile(void)
     return -EIO;
   }
 
-  // make mirror file path
-  char szfile[NAME_MAX + 1];
-  if(NULL == tmpnam(szfile)){
-    S3FS_PRN_ERR("could not get temporary file name.");
-    return -EIO;
-  }
-  char* ppos = strrchr(szfile, '/');
-  ++ppos;
-  mirrorpath = bupdir + "/" + ppos;
+  // try to link mirror file
+  while(true){
+    // make random(temp) file path
+    // (do not care for threading, because allowed any value returned.)
+    //
+    char         szfile[NAME_MAX + 1];
+    unsigned int seed = static_cast<unsigned int>(time(NULL));
+    sprintf(szfile, "%x.tmp", rand_r(&seed));
+    mirrorpath = bupdir + "/" + szfile;
 
-  // link mirror file to cache file
-  if(-1 == link(cachepath.c_str(), mirrorpath.c_str())){
-    S3FS_PRN_ERR("could not link mirror file(%s) to cache file(%s) by errno(%d).", mirrorpath.c_str(), cachepath.c_str(), errno);
-    return -errno;
+    // link mirror file to cache file
+    if(0 == link(cachepath.c_str(), mirrorpath.c_str())){
+      break;
+    }
+    if(EEXIST != errno){
+      S3FS_PRN_ERR("could not link mirror file(%s) to cache file(%s) by errno(%d).", mirrorpath.c_str(), cachepath.c_str(), errno);
+      return -errno;
+    }
   }
 
   // open mirror file
@@ -997,10 +1001,10 @@ bool FdEntity::OpenAndLoadAll(headers_t* pmeta, size_t* size, bool force_load)
 
 bool FdEntity::GetStats(struct stat& st)
 {
+  AutoLock auto_lock(&fdent_lock);
   if(-1 == fd){
     return false;
   }
-  AutoLock auto_lock(&fdent_lock);
 
   memset(&st, 0, sizeof(struct stat)); 
   if(-1 == fstat(fd, &st)){
@@ -1017,9 +1021,9 @@ int FdEntity::SetMtime(time_t time)
   if(-1 == time){
     return 0;
   }
-  if(-1 != fd){
-    AutoLock auto_lock(&fdent_lock);
 
+  AutoLock auto_lock(&fdent_lock);
+  if(-1 != fd){
     struct timeval tv[2];
     tv[0].tv_sec = time;
     tv[0].tv_usec= 0L;
@@ -1046,6 +1050,7 @@ int FdEntity::SetMtime(time_t time)
 
 bool FdEntity::UpdateMtime(void)
 {
+  AutoLock auto_lock(&fdent_lock);
   struct stat st;
   if(!GetStats(st)){
     return false;
@@ -1067,18 +1072,21 @@ bool FdEntity::GetSize(size_t& size)
 
 bool FdEntity::SetMode(mode_t mode)
 {
+  AutoLock auto_lock(&fdent_lock);
   orgmeta["x-amz-meta-mode"] = str(mode);
   return true;
 }
 
 bool FdEntity::SetUId(uid_t uid)
 {
+  AutoLock auto_lock(&fdent_lock);
   orgmeta["x-amz-meta-uid"] = str(uid);
   return true;
 }
 
 bool FdEntity::SetGId(gid_t gid)
 {
+  AutoLock auto_lock(&fdent_lock);
   orgmeta["x-amz-meta-gid"] = str(gid);
   return true;
 }
@@ -1088,6 +1096,7 @@ bool FdEntity::SetContentType(const char* path)
   if(!path){
     return false;
   }
+  AutoLock auto_lock(&fdent_lock);
   orgmeta["Content-Type"] = S3fsCurl::LookupMimeType(string(path));
   return true;
 }
@@ -1146,7 +1155,7 @@ int FdEntity::Load(off_t start, size_t size)
       size_t over_size = (*iter)->bytes - need_load_size;
 
       // download
-      if(static_cast<size_t>(2 * S3fsCurl::GetMultipartSize()) < need_load_size && !nomultipart){ // default 20MB
+      if(static_cast<size_t>(2 * S3fsCurl::GetMultipartSize()) <= need_load_size && !nomultipart){ // default 20MB
         // parallel request
         // Additional time is needed for large files
         time_t backup = 0;
@@ -1908,7 +1917,7 @@ size_t FdManager::SetEnsureFreeDiskSpace(size_t size)
   return old;
 }
 
-fsblkcnt_t FdManager::GetFreeDiskSpace(const char* path)
+uint64_t FdManager::GetFreeDiskSpace(const char* path)
 {
   struct statvfs vfsbuf;
   string         ctoppath;
@@ -1930,12 +1939,12 @@ fsblkcnt_t FdManager::GetFreeDiskSpace(const char* path)
     S3FS_PRN_ERR("could not get vfs stat by errno(%d)", errno);
     return 0;
   }
-  return (vfsbuf.f_bavail * vfsbuf.f_bsize);
+  return (vfsbuf.f_bavail * vfsbuf.f_frsize);
 }
 
 bool FdManager::IsSafeDiskSpace(const char* path, size_t size)
 {
-  fsblkcnt_t fsize = FdManager::GetFreeDiskSpace(path);
+  uint64_t fsize = FdManager::GetFreeDiskSpace(path);
   return ((size + FdManager::GetEnsureFreeDiskSpace()) <= fsize);
 }
 
@@ -2107,6 +2116,7 @@ FdEntity* FdManager::ExistOpen(const char* path, int existfd, bool ignore_existf
 
 void FdManager::Rename(const std::string &from, const std::string &to)
 {
+  AutoLock auto_lock(&FdManager::fd_manager_lock);
   fdent_map_t::iterator iter = fent.find(from);
   if(fent.end() != iter){
     // found
