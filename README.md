@@ -22,12 +22,36 @@ Features
 Installation
 ------------
 
+Some systems provide pre-built packages:
+
+* On Debian 9 and Ubuntu 16.04 or newer:
+
+  ```
+  sudo apt-get install s3fs
+  ```
+
+* On SUSE 12 or newer and openSUSE 42.1 or newer:
+
+  ```
+  sudo zypper in s3fs
+  ```
+
+* On Mac OS X, install via [Homebrew](http://brew.sh/):
+
+  ```ShellSession
+  $ brew cask install osxfuse
+  $ brew install s3fs
+  ```
+
+Compilation
+-----------
+
 * On Linux, ensure you have all the dependencies:
 
 On Ubuntu 14.04:
 
 ```
-sudo apt-get install automake autotools-dev fuse g++ git libcurl4-gnutls-dev libfuse-dev libssl-dev libxml2-dev make pkg-config
+sudo apt-get install automake autotools-dev fuse g++ git libcurl4-openssl-dev libfuse-dev libssl-dev libxml2-dev make pkg-config
 ```
 
 On CentOS 7:
@@ -47,34 +71,32 @@ make
 sudo make install
 ```
 
-* On Mac OS X, install via [Homebrew](http://brew.sh/):
-
-```ShellSession
-$ brew cask install osxfuse
-$ brew install s3fs
-```
-
 Examples
 --------
 
-Enter your S3 identity and credential in a file `/path/to/passwd` and set
+The default location for the s3fs password file can be created:
+
+* using a .passwd-s3fs file in the users home directory (i.e. ~/.passwd-s3fs)
+* using the system-wide /etc/passwd-s3fs file
+
+Enter your S3 identity and credential in a file `~/.passwd-s3fs` and set
 owner-only permissions:
 
 ```
-echo MYIDENTITY:MYCREDENTIAL > /path/to/passwd
-chmod 600 /path/to/passwd
+echo MYIDENTITY:MYCREDENTIAL >  ~/.passwd-s3fs
+chmod 600  ~/.passwd-s3fs
 ```
 
 Run s3fs with an existing bucket `mybucket` and directory `/path/to/mountpoint`:
 
 ```
-s3fs mybucket /path/to/mountpoint -o passwd_file=/path/to/passwd
+s3fs mybucket /path/to/mountpoint -o passwd_file=~/.passwd-s3fs
 ```
 
 If you encounter any errors, enable debug output:
 
 ```
-s3fs mybucket /path/to/mountpoint -o passwd_file=/path/to/passwd -o dbglevel=info -f -o curldbg
+s3fs mybucket /path/to/mountpoint -o passwd_file=~/.passwd-s3fs -o dbglevel=info -f -o curldbg
 ```
 
 You can also mount on boot by entering the following line to `/etc/fstab`:
@@ -92,7 +114,7 @@ mybucket /path/to/mountpoint fuse.s3fs _netdev,allow_other 0 0
 If you use s3fs with a non-Amazon S3 implementation, specify the URL and path-style requests:
 
 ```
-s3fs mybucket /path/to/mountpoint -o passwd_file=/path/to/passwd -o url=http://url.to.s3/ -o use_path_request_style
+s3fs mybucket /path/to/mountpoint -o passwd_file=~/.passwd-s3fs -o url=http://url.to.s3/ -o use_path_request_style
 ```
 
 or(fstab)
@@ -133,8 +155,7 @@ References
 
 * [goofys](https://github.com/kahing/goofys) - similar to s3fs but has better performance and less POSIX compatibility
 * [s3backer](https://github.com/archiecobbs/s3backer) - mount an S3 bucket as a single file
-* [s3fs-python](https://fedorahosted.org/s3fs/) - an older and less complete implementation written in Python
-* [S3Proxy](https://github.com/andrewgaul/s3proxy) - combine with s3fs to mount EMC Atmos, Microsoft Azure, and OpenStack Swift buckets
+* [S3Proxy](https://github.com/gaul/s3proxy) - combine with s3fs to mount EMC Atmos, Microsoft Azure, and OpenStack Swift buckets
 * [s3ql](https://bitbucket.org/nikratio/s3ql/) - similar to s3fs but uses its own object format
 * [YAS3FS](https://github.com/danilop/yas3fs) - similar to s3fs but uses SNS to allow multiple clients to mount a bucket
 

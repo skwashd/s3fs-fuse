@@ -226,8 +226,8 @@ bool BodyData::Append(void* ptr, size_t bytes)
 
 const char* BodyData::str(void) const
 {
-  static const char* strnull = "";
   if(!text){
+    static const char* strnull = "";
     return strnull;
   }
   return text;
@@ -304,6 +304,7 @@ void CurlHandlerPool::ReturnHandler(CURL* h)
   pthread_mutex_lock(&mLock);
   if (mIndex < mMaxHandlers - 1) {
     mHandlers[++mIndex] = h;
+    curl_easy_reset(h);
     needCleanup = false;
     S3FS_PRN_DBG("Return handler to pool: %d", mIndex);
   }
@@ -344,7 +345,7 @@ bool             S3fsCurl::is_dns_cache        = true; // default
 bool             S3fsCurl::is_ssl_session_cache= true; // default
 long             S3fsCurl::connect_timeout     = 300;  // default
 time_t           S3fsCurl::readwrite_timeout   = 60;   // default
-int              S3fsCurl::retries             = 3;    // default
+int              S3fsCurl::retries             = 5;    // default
 bool             S3fsCurl::is_public_bucket    = false;
 string           S3fsCurl::default_acl         = "private";
 storage_class_t  S3fsCurl::storage_class       = STANDARD;
@@ -395,14 +396,14 @@ bool S3fsCurl::InitS3fsCurl(const char* MimeFile)
   if(!S3fsCurl::InitGlobalCurl()){
     return false;
   }
-  sCurlPool = new CurlHandlerPool(sCurlPoolSize);
-  if (!sCurlPool->Init()) {
-    return false;
-  }
   if(!S3fsCurl::InitShareCurl()){
     return false;
   }
   if(!S3fsCurl::InitCryptMutex()){
+    return false;
+  }
+  sCurlPool = new CurlHandlerPool(sCurlPoolSize);
+  if (!sCurlPool->Init()) {
     return false;
   }
   return true;
@@ -415,10 +416,12 @@ bool S3fsCurl::DestroyS3fsCurl(void)
   if(!S3fsCurl::DestroyCryptMutex()){
     result = false;
   }
-  if(!S3fsCurl::DestroyShareCurl()){
+  if(!sCurlPool->Destroy()){
     result = false;
   }
-  if (!sCurlPool->Destroy()) {
+  delete sCurlPool;
+  sCurlPool = NULL;
+  if(!S3fsCurl::DestroyShareCurl()){
     result = false;
   }
   if(!S3fsCurl::DestroyGlobalCurl()){
@@ -631,6 +634,7 @@ void S3fsCurl::InitUserAgent(void)
     S3fsCurl::userAgent += "; ";
     S3fsCurl::userAgent += s3fs_crypt_lib_name();
     S3fsCurl::userAgent += ")";
+    S3fsCurl::userAgent += instance_name;
   }
 }
 
@@ -697,10 +701,8 @@ bool S3fsCurl::LocateBundle(void)
   // See if environment variable CURL_CA_BUNDLE is set
   // if so, check it, if it is a good path, then set the
   // curl_ca_bundle variable to it
-  char *CURL_CA_BUNDLE; 
-
   if(0 == S3fsCurl::curl_ca_bundle.size()){
-    CURL_CA_BUNDLE = getenv("CURL_CA_BUNDLE");
+    char* CURL_CA_BUNDLE = getenv("CURL_CA_BUNDLE");
     if(CURL_CA_BUNDLE != NULL)  {
       // check for existence and readability of the file
       ifstream BF(CURL_CA_BUNDLE);
@@ -1620,8 +1622,7 @@ int S3fsCurl::CurlDebugFunc(CURL* hcurl, curl_infotype type, char* data, size_t 
       break;
     case CURLINFO_HEADER_IN:
     case CURLINFO_HEADER_OUT:
-      size_t length, remaining;
-      int newline;
+      size_t remaining;
       char* p;
 
       // Print each line individually for tidy output
@@ -1629,17 +1630,17 @@ int S3fsCurl::CurlDebugFunc(CURL* hcurl, curl_infotype type, char* data, size_t 
       p = data;
       do {
         char* eol = (char*)memchr(p, '\n', remaining);
-        newline = 0;
+        int newline = 0;
         if (eol == NULL) {
           eol = (char*)memchr(p, '\r', remaining);
-        } else if (eol > p && *(eol - 1) == '\r') {
-          newline++;
-        }
-        if (eol != NULL) {
+        } else {
+          if (eol > p && *(eol - 1) == '\r') {
+            newline++;
+          }
           newline++;
           eol++;
         }
-        length = eol - p;
+        size_t length = eol - p;
         S3FS_PRN_CURL("%c %.*s", CURLINFO_HEADER_IN == type ? '<' : '>', (int)length - newline, p);
         remaining -= length;
         p = eol;
@@ -1727,7 +1728,7 @@ bool S3fsCurl::CreateCurlHandle(bool force)
       S3FS_PRN_WARN("already create handle.");
       return false;
     }
-    if(!DestroyCurlHandle()){
+    if(!DestroyCurlHandle(true)){
       S3FS_PRN_ERR("could not destroy handle.");
       return false;
     }
@@ -1755,28 +1756,33 @@ bool S3fsCurl::CreateCurlHandle(bool force)
   return true;
 }
 
-bool S3fsCurl::DestroyCurlHandle(void)
+bool S3fsCurl::DestroyCurlHandle(bool force)
 {
-  if(!hCurl){
-    return false;
-  }
-  pthread_mutex_lock(&S3fsCurl::curl_handles_lock);
-
-  S3fsCurl::curl_times.erase(hCurl);
-  S3fsCurl::curl_progress.erase(hCurl);
-  sCurlPool->ReturnHandler(hCurl);
-  hCurl = NULL;
   ClearInternalData();
 
-  pthread_mutex_unlock(&S3fsCurl::curl_handles_lock);
+  if(hCurl){
+    pthread_mutex_lock(&S3fsCurl::curl_handles_lock);
+
+    S3fsCurl::curl_times.erase(hCurl);
+    S3fsCurl::curl_progress.erase(hCurl);
+    if(retry_count == 0 || force){
+      sCurlPool->ReturnHandler(hCurl);
+    }else{
+      curl_easy_cleanup(hCurl);
+    }
+    hCurl = NULL;
+
+    pthread_mutex_unlock(&S3fsCurl::curl_handles_lock);
+  }else{
+    return false;
+  }
   return true;
 }
 
 bool S3fsCurl::ClearInternalData(void)
 {
-  if(hCurl){
-    return false;
-  }
+  // Always clear internal data
+  //
   type        = REQTYPE_UNSET;
   path        = "";
   base_path   = "";
@@ -1874,7 +1880,12 @@ bool S3fsCurl::RemakeHandle(void)
   partdata.size      = b_partdata_size;
 
   // reset handle
+  curl_easy_cleanup(hCurl);
+  hCurl = curl_easy_init();
   ResetHandle();
+  // disable ssl cache, so that a new session will be created
+  curl_easy_setopt(hCurl, CURLOPT_SSL_SESSIONID_CACHE, 0);
+  curl_easy_setopt(hCurl, CURLOPT_SHARE, NULL);
 
   // set options
   switch(type){
@@ -2052,7 +2063,7 @@ int S3fsCurl::RequestPerform(void)
           return 0;
         }
         if(500 <= LastResponseCode){
-          S3FS_PRN_INFO3("HTTP response code %ld", LastResponseCode);
+          S3FS_PRN_ERR("HTTP response code = %ld Body Text: %s", LastResponseCode, (bodydata ? bodydata->str() : ""));
           sleep(4);
           break; 
         }
@@ -2060,13 +2071,11 @@ int S3fsCurl::RequestPerform(void)
         // Service response codes which are >= 400 && < 500
         switch(LastResponseCode){
           case 400:
-            S3FS_PRN_INFO3("HTTP response code 400 was returned, returning EIO.");
-            S3FS_PRN_DBG("Body Text: %s", (bodydata ? bodydata->str() : ""));
+            S3FS_PRN_ERR("HTTP response code %ld, returning EIO. Body Text: %s", LastResponseCode, (bodydata ? bodydata->str() : ""));
             return -EIO;
 
           case 403:
-            S3FS_PRN_INFO3("HTTP response code 403 was returned, returning EPERM");
-            S3FS_PRN_DBG("Body Text: %s", (bodydata ? bodydata->str() : ""));
+            S3FS_PRN_ERR("HTTP response code %ld, returning EPERM. Body Text: %s", LastResponseCode, (bodydata ? bodydata->str() : ""));
             return -EPERM;
 
           case 404:
@@ -2075,8 +2084,7 @@ int S3fsCurl::RequestPerform(void)
             return -ENOENT;
 
           default:
-            S3FS_PRN_INFO3("HTTP response code = %ld, returning EIO", LastResponseCode);
-            S3FS_PRN_DBG("Body Text: %s", (bodydata ? bodydata->str() : ""));
+            S3FS_PRN_ERR("HTTP response code %ld, returning EIO. Body Text: %s", LastResponseCode, (bodydata ? bodydata->str() : ""));
             return -EIO;
         }
         break;
@@ -2712,10 +2720,10 @@ int S3fsCurl::HeadRequest(const char* tpath, headers_t& meta)
     // If has SSE-C keys, try to get with all SSE-C keys.
     for(int pos = 0; static_cast<size_t>(pos) < S3fsCurl::sseckeys.size(); pos++){
       if(!DestroyCurlHandle()){
-        return result;
+        break;
       }
       if(!PreHeadRequest(tpath, NULL, NULL, pos)){
-        return result;
+        break;
       }
       if(0 == (result = RequestPerform())){
         break;
@@ -2867,7 +2875,6 @@ int S3fsCurl::PutRequest(const char* tpath, headers_t& meta, int fd)
 {
   struct stat st;
   FILE*       file = NULL;
-  int         fd2;
 
   S3FS_PRN_INFO3("[tpath=%s]", SAFESTRPTR(tpath));
 
@@ -2876,6 +2883,7 @@ int S3fsCurl::PutRequest(const char* tpath, headers_t& meta, int fd)
   }
   if(-1 != fd){
     // duplicate fd
+    int fd2;
     if(-1 == (fd2 = dup(fd)) || -1 == fstat(fd2, &st) || 0 != lseek(fd2, 0, SEEK_SET) || NULL == (file = fdopen(fd2, "rb"))){
       S3FS_PRN_ERR("Could not duplicate file descriptor(errno=%d)", errno);
       if(-1 != fd2){
@@ -2980,7 +2988,7 @@ int S3fsCurl::PutRequest(const char* tpath, headers_t& meta, int fd)
 
 int S3fsCurl::PreGetObjectRequest(const char* tpath, int fd, off_t start, ssize_t size, sse_type_t ssetype, string& ssevalue)
 {
-  S3FS_PRN_INFO3("[tpath=%s][start=%jd][size=%zd]", SAFESTRPTR(tpath), (intmax_t)start, size);
+  S3FS_PRN_INFO3("[tpath=%s][start=%jd][size=%jd]", SAFESTRPTR(tpath), (intmax_t)start, (intmax_t)size);
 
   if(!tpath || -1 == fd || 0 > start || 0 > size){
     return -1;
@@ -3040,7 +3048,7 @@ int S3fsCurl::GetObjectRequest(const char* tpath, int fd, off_t start, ssize_t s
 {
   int result;
 
-  S3FS_PRN_INFO3("[tpath=%s][start=%jd][size=%zd]", SAFESTRPTR(tpath), (intmax_t)start, size);
+  S3FS_PRN_INFO3("[tpath=%s][start=%jd][size=%jd]", SAFESTRPTR(tpath), (intmax_t)start, (intmax_t)size);
 
   if(!tpath){
     return -1;
@@ -3418,7 +3426,7 @@ int S3fsCurl::AbortMultipartUpload(const char* tpath, string& upload_id)
 
 int S3fsCurl::UploadMultipartPostSetup(const char* tpath, int part_num, const string& upload_id)
 {
-  S3FS_PRN_INFO3("[tpath=%s][start=%jd][size=%zd][part=%d]", SAFESTRPTR(tpath), (intmax_t)(partdata.startpos), partdata.size, part_num);
+  S3FS_PRN_INFO3("[tpath=%s][start=%jd][size=%jd][part=%d]", SAFESTRPTR(tpath), (intmax_t)(partdata.startpos), (intmax_t)(partdata.size), part_num);
 
   if(-1 == partdata.fd || -1 == partdata.startpos || -1 == partdata.size){
     return -1;
@@ -3492,7 +3500,7 @@ int S3fsCurl::UploadMultipartPostRequest(const char* tpath, int part_num, const 
 {
   int result;
 
-  S3FS_PRN_INFO3("[tpath=%s][start=%jd][size=%zd][part=%d]", SAFESTRPTR(tpath), (intmax_t)(partdata.startpos), partdata.size, part_num);
+  S3FS_PRN_INFO3("[tpath=%s][start=%jd][size=%jd][part=%d]", SAFESTRPTR(tpath), (intmax_t)(partdata.startpos), (intmax_t)(partdata.size), part_num);
 
   // setup
   if(0 != (result = S3fsCurl::UploadMultipartPostSetup(tpath, part_num, upload_id))){
@@ -3893,11 +3901,14 @@ int S3fsMultiCurl::MultiPerform(void)
 {
   std::vector<pthread_t>   threads;
   bool                     success = true;
+  bool                     isMultiHead = false;
 
   for(s3fscurlmap_t::iterator iter = cMap_req.begin(); iter != cMap_req.end(); ++iter) {
     pthread_t   thread;
     S3fsCurl*   s3fscurl = (*iter).second;
     int         rc;
+
+    isMultiHead |= s3fscurl->GetOp() == "HEAD";
 
     rc = pthread_create(&thread, NULL, S3fsMultiCurl::RequestPerformWrapper, static_cast<void*>(s3fscurl));
     if (rc != 0) {
@@ -3919,9 +3930,8 @@ int S3fsMultiCurl::MultiPerform(void)
       S3FS_PRN_ERR("failed pthread_join - rc(%d)", rc);
     } else {
       int int_retval = (int)(intptr_t)(retval);
-      if (int_retval) {
-        S3FS_PRN_ERR("thread failed - rc(%d)", int_retval);
-        success = false;
+      if (int_retval && !(int_retval == ENOENT && isMultiHead)) {
+        S3FS_PRN_WARN("thread failed - rc(%d)", int_retval);
       }
     }
   }
@@ -3949,7 +3959,10 @@ int S3fsMultiCurl::MultiRead(void)
         isRetry = true;
       }else if(404 == responseCode){
         // not found
-        S3FS_PRN_WARN("failed a request(%ld: %s)", responseCode, s3fscurl->url.c_str());
+        // HEAD requests on readdir_multi_head can return 404
+        if(s3fscurl->GetOp() != "HEAD"){
+          S3FS_PRN_WARN("failed a request(%ld: %s)", responseCode, s3fscurl->url.c_str());
+        }
       }else if(500 == responseCode){
         // case of all other result, do retry.(11/13/2013)
         // because it was found that s3fs got 500 error from S3, but could success
@@ -3994,8 +4007,6 @@ int S3fsMultiCurl::MultiRead(void)
 
 int S3fsMultiCurl::Request(void)
 {
-  int result;
-
   S3FS_PRN_INFO3("[count=%zu]", cMap_all.size());
 
   // Make request list.
@@ -4005,6 +4016,7 @@ int S3fsMultiCurl::Request(void)
   //
   while(!cMap_all.empty()){
     // set curl handle to multi handle
+    int                     result;
     int                     cnt;
     s3fscurlmap_t::iterator iter;
     for(cnt = 0, iter = cMap_all.begin(); cnt < S3fsMultiCurl::max_multireq && iter != cMap_all.end(); cMap_all.erase(iter++), cnt++){
@@ -4071,7 +4083,7 @@ struct curl_slist* curl_slist_sort_insert(struct curl_slist* list, const char* k
   if(!key){
     return list;
   }
-  if(NULL == (new_item = (struct curl_slist*)malloc(sizeof(struct curl_slist)))){
+  if(NULL == (new_item = reinterpret_cast<struct curl_slist*>(malloc(sizeof(struct curl_slist))))){
     return list;
   }
 

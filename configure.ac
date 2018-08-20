@@ -20,7 +20,7 @@
 dnl Process this file with autoconf to produce a configure script.
 
 AC_PREREQ(2.59)
-AC_INIT(s3fs, 1.83)
+AC_INIT(s3fs, 1.84)
 AC_CONFIG_HEADER([config.h])
 
 AC_CANONICAL_SYSTEM
@@ -39,6 +39,11 @@ dnl ----------------------------------------------
 dnl For OSX
 dnl ----------------------------------------------
 case "$target" in
+   *-cygwin* )
+      # Do something specific for windows using winfsp
+      CXXFLAGS="$CXXFLAGS -D_GNU_SOURCE=1"
+      min_fuse_version=2.8
+      ;;
    *-darwin* )
       # Do something specific for mac
       min_fuse_version=2.7.3

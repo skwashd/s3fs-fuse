@@ -100,6 +100,7 @@ std::string host                  = "https://s3.amazonaws.com";
 std::string bucket                = "";
 std::string endpoint              = "us-east-1";
 std::string cipher_suites         = "";
+std::string instance_name         = "";
 s3fs_log_level debug_level        = S3FS_LOG_CRIT;
 const char*    s3fs_log_nest[S3FS_LOG_NEST_MAX] = {"", "  ", "    ", "      "};
 
@@ -135,6 +136,7 @@ static int64_t singlepart_copy_limit = FIVE_GB;
 static bool is_specified_endpoint = false;
 static int s3fs_init_deferred_exit_status = 0;
 static bool support_compat_dir    = true;// default supports compatibility directory type
+static int max_keys_list_object   = 1000;// default is 1000
 
 static const std::string allbucket_fields_type = "";         // special key for mapping(This name is absolutely not used as a bucket name)
 static const std::string keyval_fields_type    = "\t";       // special key for mapping(This name is absolutely not used as a bucket name)
@@ -892,7 +894,7 @@ static int s3fs_readlink(const char* path, char* buf, size_t size)
   // Read
   ssize_t ressize;
   if(0 > (ressize = ent->Read(buf, 0, readsize))){
-    S3FS_PRN_ERR("could not read file(file=%s, errno=%zd)", path, ressize);
+    S3FS_PRN_ERR("could not read file(file=%s, ressize=%jd)", path, (intmax_t)ressize);
     FdManager::get()->Close(ent);
     return static_cast<int>(ressize);
   }
@@ -2138,7 +2140,7 @@ static int s3fs_read(const char* path, char* buf, size_t size, off_t offset, str
   }
 
   if(0 > (res = ent->Read(buf, offset, size, false))){
-    S3FS_PRN_WARN("failed to read file(%s). result=%zd", path, res);
+    S3FS_PRN_WARN("failed to read file(%s). result=%jd", path, (intmax_t)res);
   }
   FdManager::get()->Close(ent);
 
@@ -2160,7 +2162,7 @@ static int s3fs_write(const char* path, const char* buf, size_t size, off_t offs
     S3FS_PRN_WARN("different fd(%d - %llu)", ent->GetFd(), (unsigned long long)(fi->fh));
   }
   if(0 > (res = ent->Write(buf, offset, size))){
-    S3FS_PRN_WARN("failed to write file(%s). result=%zd", path, res);
+    S3FS_PRN_WARN("failed to write file(%s). result=%jd", path, (intmax_t)res);
   }
   FdManager::get()->Close(ent);
 
@@ -2463,7 +2465,6 @@ static int s3fs_readdir(const char* path, void* buf, fuse_fill_dir_t filler, off
 
 static int list_bucket(const char* path, S3ObjList& head, const char* delimiter, bool check_content_only)
 {
-  int       result; 
   string    s3_realpath;
   string    query_delimiter;;
   string    query_prefix;;
@@ -2472,7 +2473,6 @@ static int list_bucket(const char* path, S3ObjList& head, const char* delimiter,
   bool      truncated = true;
   S3fsCurl  s3fscurl;
   xmlDocPtr doc;
-  BodyData* body;
 
   S3FS_PRN_INFO1("[path=%s]", path);
 
@@ -2495,7 +2495,7 @@ static int list_bucket(const char* path, S3ObjList& head, const char* delimiter,
     // For dir with children, expect "dir/" and "dir/child"
     query_maxkey += "max-keys=2";
   }else{
-    query_maxkey += "max-keys=1000";
+    query_maxkey += "max-keys=" + str(max_keys_list_object);
   }
 
   while(truncated){
@@ -2508,11 +2508,12 @@ static int list_bucket(const char* path, S3ObjList& head, const char* delimiter,
     each_query += query_prefix;
 
     // request
+    int result; 
     if(0 != (result = s3fscurl.ListBucketRequest(path, each_query.c_str()))){
       S3FS_PRN_ERR("ListBucketRequest returns with error.");
       return result;
     }
-    body = s3fscurl.GetBodyData();
+    BodyData* body = s3fscurl.GetBodyData();
 
     // xmlDocPtr
     if(NULL == (doc = xmlReadMemory(body->str(), static_cast<int>(body->size()), "", NULL, 0))){
@@ -2572,7 +2573,7 @@ static int append_objects_from_xml_ex(const char* path, xmlDocPtr doc, xmlXPathC
     return -1;
   }
   if(xmlXPathNodeSetIsEmpty(contents_xp->nodesetval)){
-    S3FS_PRN_WARN("contents_xp->nodesetval is empty.");
+    S3FS_PRN_DBG("contents_xp->nodesetval is empty.");
     S3FS_XMLXPATHFREEOBJECT(contents_xp);
     return 0;
   }
@@ -2724,7 +2725,7 @@ static xmlChar* get_base_exp(xmlDocPtr doc, const char* exp)
 {
   xmlXPathObjectPtr  marker_xp;
   string xmlnsurl;
-  string exp_string = "//";
+  string exp_string;
 
   if(!doc){
     return NULL;
@@ -2733,8 +2734,11 @@ static xmlChar* get_base_exp(xmlDocPtr doc, const char* exp)
 
   if(!noxmlns && GetXmlNsUrl(doc, xmlnsurl)){
     xmlXPathRegisterNs(ctx, (xmlChar*)"s3", (xmlChar*)xmlnsurl.c_str());
-    exp_string += "s3:";
+    exp_string = "/s3:ListBucketResult/s3:";
+  } else {
+    exp_string = "/ListBucketResult/";
   }
+  
   exp_string += exp;
 
   if(NULL == (marker_xp = xmlXPathEvalExpression((xmlChar *)exp_string.c_str(), ctx))){
@@ -2973,15 +2977,19 @@ static int set_xattrs_to_header(headers_t& meta, const char* name, const char* v
 
   headers_t::iterator iter;
   if(meta.end() == (iter = meta.find("x-amz-meta-xattr"))){
+#if defined(XATTR_REPLACE)
     if(XATTR_REPLACE == (flags & XATTR_REPLACE)){
       // there is no xattr header but flags is replace, so failure.
       return -ENOATTR;
     }
+#endif
   }else{
+#if defined(XATTR_CREATE)
     if(XATTR_CREATE == (flags & XATTR_CREATE)){
       // found xattr header but flags is only creating, so failure.
       return -EEXIST;
     }
+#endif
     strxattrs = iter->second;
   }
 
@@ -3375,20 +3383,6 @@ static void* s3fs_init(struct fuse_conn_info* conn)
     S3FS_PRN_DBG("Could not initialize cache directory.");
   }
 
-  // ssl init
-  if(!s3fs_init_global_ssl()){
-    S3FS_PRN_CRIT("could not initialize for ssl libraries.");
-    s3fs_exit_fuseloop(EXIT_FAILURE);
-    return NULL;
-  }
-
-  // init curl
-  if(!S3fsCurl::InitS3fsCurl("/etc/mime.types")){
-    S3FS_PRN_CRIT("Could not initiate curl library.");
-    s3fs_exit_fuseloop(EXIT_FAILURE);
-    return NULL;
-  }
-
   // check loading IAM role name
   if(load_iamrole){
     // load IAM role name from http://169.254.169.254/latest/meta-data/iam/security-credentials
@@ -3433,16 +3427,10 @@ static void s3fs_destroy(void*)
 {
   S3FS_PRN_INFO("destroy");
 
-  // Destroy curl
-  if(!S3fsCurl::DestroyS3fsCurl()){
-    S3FS_PRN_WARN("Could not release curl library.");
-  }
   // cache(remove at last)
   if(is_remove_cache && (!CacheFileStat::DeleteCacheFileStatDirectory() || !FdManager::DeleteCacheDirectory())){
     S3FS_PRN_WARN("Could not remove cache directory.");
   }
-  // ssl
-  s3fs_destroy_global_ssl();
 }
 
 static int s3fs_access(const char* path, int mask)
@@ -3645,20 +3633,6 @@ static int s3fs_utility_mode(void)
   if(!utility_mode){
     return EXIT_FAILURE;
   }
-
-  // ssl init
-  if(!s3fs_init_global_ssl()){
-    S3FS_PRN_EXIT("could not initialize for ssl libraries.");
-    return EXIT_FAILURE;
-  }
-
-  // init curl
-  if(!S3fsCurl::InitS3fsCurl("/etc/mime.types")){
-    S3FS_PRN_EXIT("Could not initiate curl library.");
-    s3fs_destroy_global_ssl();
-    return EXIT_FAILURE;
-  }
-
   printf("Utility Mode\n");
 
   S3fsCurl s3fscurl;
@@ -3815,6 +3789,7 @@ static int s3fs_check_service(void)
       return EXIT_FAILURE;
     }
   }
+  s3fscurl.DestroyCurlHandle();
 
   // make sure remote mountpath exists and is a directory
   if(mount_prefix.size() > 0){
@@ -3847,7 +3822,6 @@ static int parse_passwd_file(bucketkvmap_t& resmap)
 {
   string line;
   size_t first_pos;
-  size_t last_pos;
   readline_t linelist;
   readline_t::iterator iter;
 
@@ -3902,8 +3876,8 @@ static int parse_passwd_file(bucketkvmap_t& resmap)
 
   // read ':' type
   for(iter = linelist.begin(); iter != linelist.end(); ++iter){
-    first_pos = iter->find_first_of(":");
-    last_pos  = iter->find_last_of(":");
+    first_pos       = iter->find_first_of(":");
+    size_t last_pos = iter->find_last_of(":");
     if(first_pos == string::npos){
       continue;
     }
@@ -3922,7 +3896,7 @@ static int parse_passwd_file(bucketkvmap_t& resmap)
       secret    = trim(iter->substr(first_pos + 1, string::npos));
     }
     if(resmap.end() != resmap.find(bucket)){
-      S3FS_PRN_EXIT("same bucket(%s) passwd setting found in passwd file.", ("" == bucket ? "default" : bucket.c_str()));
+      S3FS_PRN_EXIT("there are mutliple entries for the same bucket(%s) in the passwd file.", ("" == bucket ? "default" : bucket.c_str()));
       return -1;
     }
     kv.clear();
@@ -4550,6 +4524,18 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
       is_ibm_iam_auth = true;
       return 0;
     }
+    if(0 == STR2NCMP(arg, "ibm_iam_endpoint=")){
+      std::string endpoint_url = "";
+      std::string iam_endpoint = strchr(arg, '=') + sizeof(char);
+      // Check url for http / https protocol string
+      if((iam_endpoint.compare(0, 8, "https://") != 0) && (iam_endpoint.compare(0, 7, "http://") != 0)) {
+         S3FS_PRN_EXIT("option ibm_iam_endpoint has invalid format, missing http / https protocol");
+         return -1;
+      }
+      endpoint_url = iam_endpoint + "/oidc/token";
+      S3fsCurl::SetIAMCredentialsURL(endpoint_url.c_str());
+      return 0;
+    }
     if(0 == strcmp(arg, "ecs")){
       if (is_ibm_iam_auth) {
         S3FS_PRN_EXIT("option ecs cannot be used in conjunction with ibm");
@@ -4625,6 +4611,15 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
       S3fsCurl::SetReadwriteTimeout(rwtimeout);
       return 0;
     }
+    if(0 == strcmp(arg, "list_object_max_keys")){
+      int max_keys = static_cast<int>(s3fs_strtoofft(strchr(arg, '=') + sizeof(char)));
+      if(max_keys < 1000){
+        S3FS_PRN_EXIT("argument should be over 1000: list_object_max_keys");
+        return -1;
+      }
+      max_keys_list_object = max_keys;
+      return 0;
+    }
     if(0 == STR2NCMP(arg, "max_stat_cache_size=")){
       unsigned long cache_size = static_cast<unsigned long>(s3fs_strtoofft(strchr(arg, '=') + sizeof(char)));
       StatCache::getStatCacheData()->SetCacheSize(cache_size);
@@ -4673,8 +4668,6 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
         S3FS_PRN_EXIT("multipart_size option must be at least 5 MB.");
         return -1;
       }
-      // update ensure free disk space if it is not set.
-      FdManager::InitEnsureFreeDiskSpace();
       return 0;
     }
     if(0 == STR2NCMP(arg, "ensure_diskfree=")){
@@ -4735,6 +4728,11 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
          found  = host.find_last_of('/');
          length = host.length();
       }
+      // Check url for http / https protocol string
+      if((host.compare(0, 8, "https://") != 0) && (host.compare(0, 7, "http://") != 0)) {
+         S3FS_PRN_EXIT("option url has invalid format, missing http / https protocol");
+         return -1;
+      }
       return 0;
     }
     if(0 == strcmp(arg, "sigv2")){
@@ -4775,6 +4773,11 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
     }
     if(0 == STR2NCMP(arg, "cipher_suites=")){
       cipher_suites = strchr(arg, '=') + sizeof(char);
+      return 0;
+    }
+    if(0 == STR2NCMP(arg, "instance_name=")){
+      instance_name = strchr(arg, '=') + sizeof(char);
+      instance_name = "[" + instance_name + "]";
       return 0;
     }
     //
@@ -4860,9 +4863,8 @@ int main(int argc, char* argv[])
   LIBXML_TEST_VERSION
 
   // get program name - emulate basename
-  size_t found = string::npos;
   program_name.assign(argv[0]);
-  found = program_name.find_last_of("/");
+  size_t found = program_name.find_last_of("/");
   if(found != string::npos){
     program_name.replace(0, found+1, "");
   }
@@ -4901,6 +4903,19 @@ int main(int argc, char* argv[])
     exit(EXIT_FAILURE);
   }
 
+  // ssl init
+  if(!s3fs_init_global_ssl()){
+    S3FS_PRN_EXIT("could not initialize for ssl libraries.");
+    exit(EXIT_FAILURE);
+  }
+
+  // init curl
+  if(!S3fsCurl::InitS3fsCurl("/etc/mime.types")){
+    S3FS_PRN_EXIT("Could not initiate curl library.");
+    s3fs_destroy_global_ssl();
+    exit(EXIT_FAILURE);
+  }
+
   // clear this structure
   memset(&s3fs_oper, 0, sizeof(s3fs_oper));
 
@@ -4909,6 +4924,8 @@ int main(int argc, char* argv[])
   // should have been set
   struct fuse_args custom_args = FUSE_ARGS_INIT(argc, argv);
   if(0 != fuse_opt_parse(&custom_args, NULL, NULL, my_fuse_opt_proc)){
+    S3fsCurl::DestroyS3fsCurl();
+    s3fs_destroy_global_ssl();
     exit(EXIT_FAILURE);
   }
 
@@ -4917,10 +4934,14 @@ int main(int argc, char* argv[])
   //
   if(REDUCED_REDUNDANCY == S3fsCurl::GetStorageClass() && !S3fsCurl::IsSseDisable()){
     S3FS_PRN_EXIT("use_sse option could not be specified with storage class reduced_redundancy.");
+    S3fsCurl::DestroyS3fsCurl();
+    s3fs_destroy_global_ssl();
     exit(EXIT_FAILURE);
   }
   if(!S3fsCurl::FinalCheckSse()){
     S3FS_PRN_EXIT("something wrong about SSE options.");
+    S3fsCurl::DestroyS3fsCurl();
+    s3fs_destroy_global_ssl();
     exit(EXIT_FAILURE);
   }
 
@@ -4928,12 +4949,16 @@ int main(int argc, char* argv[])
   if(bucket.size() == 0){
     S3FS_PRN_EXIT("missing BUCKET argument.");
     show_usage();
+    S3fsCurl::DestroyS3fsCurl();
+    s3fs_destroy_global_ssl();
     exit(EXIT_FAILURE);
   }
 
   // bucket names cannot contain upper case characters in virtual-hosted style
   if((!pathrequeststyle) && (lower(bucket) != bucket)){
     S3FS_PRN_EXIT("BUCKET %s, name not compatible with virtual-hosted style.", bucket.c_str());
+    S3fsCurl::DestroyS3fsCurl();
+    s3fs_destroy_global_ssl();
     exit(EXIT_FAILURE);
   }
 
@@ -4941,6 +4966,8 @@ int main(int argc, char* argv[])
   found = bucket.find_first_of("/:\\;!@#$%^&*?|+=");
   if(found != string::npos){
     S3FS_PRN_EXIT("BUCKET %s -- bucket name contains an illegal character.", bucket.c_str());
+    S3fsCurl::DestroyS3fsCurl();
+    s3fs_destroy_global_ssl();
     exit(EXIT_FAILURE);
   }
 
@@ -4952,6 +4979,8 @@ int main(int argc, char* argv[])
     if(mountpoint.size() == 0){
       S3FS_PRN_EXIT("missing MOUNTPOINT argument.");
       show_usage();
+      S3fsCurl::DestroyS3fsCurl();
+      s3fs_destroy_global_ssl();
       exit(EXIT_FAILURE);
     }
   }
@@ -4959,18 +4988,26 @@ int main(int argc, char* argv[])
   // error checking of command line arguments for compatibility
   if(S3fsCurl::IsPublicBucket() && S3fsCurl::IsSetAccessKeys()){
     S3FS_PRN_EXIT("specifying both public_bucket and the access keys options is invalid.");
+    S3fsCurl::DestroyS3fsCurl();
+    s3fs_destroy_global_ssl();
     exit(EXIT_FAILURE);
   }
   if(passwd_file.size() > 0 && S3fsCurl::IsSetAccessKeys()){
     S3FS_PRN_EXIT("specifying both passwd_file and the access keys options is invalid.");
+    S3fsCurl::DestroyS3fsCurl();
+    s3fs_destroy_global_ssl();
     exit(EXIT_FAILURE);
   }
   if(!S3fsCurl::IsPublicBucket() && !load_iamrole && !is_ecs){
     if(EXIT_SUCCESS != get_access_keys()){
+      S3fsCurl::DestroyS3fsCurl();
+      s3fs_destroy_global_ssl();
       exit(EXIT_FAILURE);
     }
     if(!S3fsCurl::IsSetAccessKeys()){
       S3FS_PRN_EXIT("could not establish security credentials, check documentation.");
+      S3fsCurl::DestroyS3fsCurl();
+      s3fs_destroy_global_ssl();
       exit(EXIT_FAILURE);
     }
     // More error checking on the access key pair can be done
@@ -4980,6 +5017,8 @@ int main(int argc, char* argv[])
   // check cache dir permission
   if(!FdManager::CheckCacheDirExist() || !FdManager::CheckCacheTopDir() || !CacheFileStat::CheckCacheFileStatTopDir()){
     S3FS_PRN_EXIT("could not allow cache directory permission, check permission of cache directories.");
+    S3fsCurl::DestroyS3fsCurl();
+    s3fs_destroy_global_ssl();
     exit(EXIT_FAILURE);
   }
 
@@ -4994,12 +5033,16 @@ int main(int argc, char* argv[])
       S3fsCurl::SetDefaultAcl("");
     }else if(defaultACL != "public-read"){
       S3FS_PRN_EXIT("can only use 'public-read' or 'private' ACL while using ibm_iam_auth");
-      return -1;
+      S3fsCurl::DestroyS3fsCurl();
+      s3fs_destroy_global_ssl();
+      exit(EXIT_FAILURE);
     }
 
     if(create_bucket && !S3fsCurl::IsSetAccessKeyID()){
       S3FS_PRN_EXIT("missing service instance ID for bucket creation");
-      return -1;
+      S3fsCurl::DestroyS3fsCurl();
+      s3fs_destroy_global_ssl();
+      exit(EXIT_FAILURE);
     }
   }
 
@@ -5033,13 +5076,18 @@ int main(int argc, char* argv[])
   */
 
   if(utility_mode){
-    exit(s3fs_utility_mode());
+    int exitcode = s3fs_utility_mode();
+
+    S3fsCurl::DestroyS3fsCurl();
+    s3fs_destroy_global_ssl();
+    exit(exitcode);
   }
 
   // check free disk space
-  FdManager::InitEnsureFreeDiskSpace();
-  if(!FdManager::IsSafeDiskSpace(NULL, S3fsCurl::GetMultipartSize())){
+  if(!FdManager::IsSafeDiskSpace(NULL, S3fsCurl::GetMultipartSize() * S3fsCurl::GetMaxParallelCount())){
     S3FS_PRN_EXIT("There is no enough disk space for used as cache(or temporary) directory by s3fs.");
+    S3fsCurl::DestroyS3fsCurl();
+    s3fs_destroy_global_ssl();
     exit(EXIT_FAILURE);
   }
 
@@ -5086,6 +5134,8 @@ int main(int argc, char* argv[])
   // set signal handler for debugging
   if(!set_s3fs_usr2_handler()){
     S3FS_PRN_EXIT("could not set signal handler for SIGUSR2.");
+    S3fsCurl::DestroyS3fsCurl();
+    s3fs_destroy_global_ssl();
     exit(EXIT_FAILURE);
   }
 
@@ -5093,6 +5143,10 @@ int main(int argc, char* argv[])
   fuse_res = fuse_main(custom_args.argc, custom_args.argv, &s3fs_oper, NULL);
   fuse_opt_free_args(&custom_args);
 
+  // Destroy curl
+  if(!S3fsCurl::DestroyS3fsCurl()){
+    S3FS_PRN_WARN("Could not release curl library.");
+  }
   s3fs_destroy_global_ssl();
 
   // cleanup xml2

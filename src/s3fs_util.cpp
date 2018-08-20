@@ -453,6 +453,7 @@ AutoLock::~AutoLock()
 string get_username(uid_t uid)
 {
   static size_t maxlen = 0;	// set once
+  int result;
   char* pbuf;
   struct passwd pwinfo;
   struct passwd* ppwinfo = NULL;
@@ -461,9 +462,17 @@ string get_username(uid_t uid)
   if(0 == maxlen){
     long res = sysconf(_SC_GETPW_R_SIZE_MAX);
     if(0 > res){
-      S3FS_PRN_WARN("could not get max pw length.");
-      maxlen = 0;
-      return string("");
+      // SUSv4tc1 says the following about _SC_GETGR_R_SIZE_MAX and
+      // _SC_GETPW_R_SIZE_MAX:
+      // Note that sysconf(_SC_GETGR_R_SIZE_MAX) may return -1 if
+      // there is no hard limit on the size of the buffer needed to
+      // store all the groups returned.
+      if (errno != 0){
+        S3FS_PRN_WARN("could not get max pw length.");
+        maxlen = 0;
+        return string("");
+      }
+      res = 1024; // default initial length
     }
     maxlen = res;
   }
@@ -471,12 +480,22 @@ string get_username(uid_t uid)
     S3FS_PRN_CRIT("failed to allocate memory.");
     return string("");
   }
-  // get group information
-  if(0 != getpwuid_r(uid, &pwinfo, pbuf, maxlen, &ppwinfo)){
-    S3FS_PRN_WARN("could not get pw information.");
+  // get pw information
+  while(ERANGE == (result = getpwuid_r(uid, &pwinfo, pbuf, maxlen, &ppwinfo))){
+    free(pbuf);
+    maxlen *= 2;
+    if(NULL == (pbuf = (char*)malloc(sizeof(char) * maxlen))){
+      S3FS_PRN_CRIT("failed to allocate memory.");
+      return string("");
+    }
+  }
+
+  if(0 != result){
+    S3FS_PRN_ERR("could not get pw information(%d).", result);
     free(pbuf);
     return string("");
   }
+
   // check pw
   if(NULL == ppwinfo){
     free(pbuf);
@@ -498,10 +517,18 @@ int is_uid_include_group(uid_t uid, gid_t gid)
   // make buffer
   if(0 == maxlen){
     long res = sysconf(_SC_GETGR_R_SIZE_MAX);
-    if(0 > res){
-      S3FS_PRN_ERR("could not get max name length.");
-      maxlen = 0;
-      return -ERANGE;
+    if(0 > res) {
+      // SUSv4tc1 says the following about _SC_GETGR_R_SIZE_MAX and
+      // _SC_GETPW_R_SIZE_MAX:
+      // Note that sysconf(_SC_GETGR_R_SIZE_MAX) may return -1 if
+      // there is no hard limit on the size of the buffer needed to
+      // store all the groups returned.
+      if (errno != 0) {
+        S3FS_PRN_ERR("could not get max name length.");
+        maxlen = 0;
+        return -ERANGE;
+      }
+      res = 1024; // default initial length
     }
     maxlen = res;
   }
@@ -594,7 +621,7 @@ int mkdirp(const string& path, mode_t mode)
         return EPERM;
       }
     }else{
-      if(0 != mkdir(base.c_str(), mode)){
+      if(0 != mkdir(base.c_str(), mode) && errno != EEXIST){
         return errno;
      }
     }
@@ -981,7 +1008,7 @@ void show_help (void)
     "        header.  see http://aws.amazon.com/documentation/s3/ for the\n"
     "        full list of canned acls\n"
     "\n"
-    "   retries (default=\"2\")\n"
+    "   retries (default=\"5\")\n"
     "      - number of times to retry a failed s3 transaction\n"
     "\n"
     "   use_cache (default=\"\" which means disabled)\n"
@@ -1083,7 +1110,11 @@ void show_help (void)
     "   readwrite_timeout (default=\"60\" seconds)\n"
     "      - time to wait between read/write activity before giving up\n"
     "\n"
-    "   max_stat_cache_size (default=\"1000\" entries (about 4MB))\n"
+    "   list_object_max_keys (default=\"1000\")\n"
+    "      - specify the maximum number of keys returned by S3 list object\n"
+    "        API. The default is 1000. you can set this value to 1000 or more.\n"
+    "\n"
+    "   max_stat_cache_size (default=\"100,000\" entries (about 40MB))\n"
     "      - maximum number of entries in the stat cache\n"
     "\n"
     "   stat_cache_expire (default is no expire)\n"
@@ -1125,7 +1156,7 @@ void show_help (void)
     "   multipart_size (default=\"10\")\n"
     "      - part size, in MB, for each multipart request.\n"
     "\n"
-    "   ensure_diskfree (default same multipart_size value)\n"
+    "   ensure_diskfree (default 0)\n"
     "      - sets MB to ensure disk free space. s3fs makes file for\n"
     "        downloading, uploading and caching files. If the disk free\n"
     "        space is smaller than this value, s3fs do not use diskspace\n"
@@ -1181,6 +1212,9 @@ void show_help (void)
     "      - This option instructs s3fs to use IBM IAM authentication.\n"
     "      In this mode, the AWSAccessKey and AWSSecretKey will be used as\n"
     "      IBM's Service-Instance-ID and APIKey, respectively.\n"
+    "\n"
+    "   ibm_iam_endpoint (default is https://iam.bluemix.net)\n"
+    "      - sets the url to use for IBM IAM authentication.\n"
     "\n"
     "   use_xattr (default is not handling the extended attribute)\n"
     "      Enable to handle the extended attribute(xattrs).\n"
@@ -1239,6 +1273,9 @@ void show_help (void)
     "        A list of available cipher suites, depending on your TLS engine,\n"
     "        can be found on the CURL library documentation:\n"
     "        https://curl.haxx.se/docs/ssl-ciphers.html\n"
+    "\n"
+    "   instance_name - The instance name of the current s3fs mountpoint.\n"
+    "        This name will be added to logging messages and user agent headers sent by s3fs.\n"
     "\n"
     "   complement_stat (complement lack of file/directory mode)\n"
     "        s3fs complements lack of information about file/directory mode\n"
