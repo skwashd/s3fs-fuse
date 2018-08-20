@@ -41,7 +41,7 @@ set -o errexit
 S3FS=../src/s3fs
 
 # Allow these defaulted values to be overridden
-: ${S3_URL:="http://127.0.0.1:8080"}
+: ${S3_URL:="https://127.0.0.1:8080"}
 : ${S3FS_CREDENTIALS_FILE:="passwd-s3fs"}
 : ${TEST_BUCKET_1:="s3fs-integration-test"}
 
@@ -50,7 +50,7 @@ export S3_URL
 export TEST_SCRIPT_DIR=`pwd`
 export TEST_BUCKET_MOUNT_POINT_1=${TEST_BUCKET_1}
 
-S3PROXY_VERSION="1.5.2"
+S3PROXY_VERSION="1.5.3"
 S3PROXY_BINARY=${S3PROXY_BINARY-"s3proxy-${S3PROXY_VERSION}"}
 
 if [ ! -f "$S3FS_CREDENTIALS_FILE" ]
@@ -108,7 +108,8 @@ function start_s3proxy {
             chmod +x "${S3PROXY_BINARY}"
         fi
 
-        stdbuf -oL -eL java -jar "$S3PROXY_BINARY" --properties $S3PROXY_CONFIG | stdbuf -oL -eL sed -u "s/^/s3proxy: /" &
+        stdbuf -oL -eL java -jar "$S3PROXY_BINARY" --properties $S3PROXY_CONFIG &
+        S3PROXY_PID=$!
 
         # wait for S3Proxy to start
         for i in $(seq 30);
@@ -121,8 +122,6 @@ function start_s3proxy {
             fi
             sleep 1
         done
-
-        S3PROXY_PID=$(netstat -lpnt | grep :8080 | awk '{ print $7 }' | sed -u 's|/java||')
     fi
 }
 
@@ -130,7 +129,6 @@ function stop_s3proxy {
     if [ -n "${S3PROXY_PID}" ]
     then
         kill $S3PROXY_PID
-        wait $S3PROXY_PID
     fi
 }
 
@@ -181,15 +179,34 @@ function start_s3fs {
             $TEST_BUCKET_MOUNT_POINT_1 \
             -o use_path_request_style \
             -o url=${S3_URL} \
+            -o no_check_certificate \
+            -o ssl_verify_hostname=0 \
             -o createbucket \
             ${AUTH_OPT} \
             -o dbglevel=${DBGLEVEL:=info} \
+            -o retries=3 \
             -f \
-            ${@} \
-        |& stdbuf -oL -eL sed -u "s/^/s3fs: /" &
+            ${@} | stdbuf -oL -eL sed -u "s/^/s3fs: /" &
     )
 
-    retry 5 grep -q $TEST_BUCKET_MOUNT_POINT_1 /proc/mounts || exit 1
+    if [ `uname` = "Darwin" ]; then
+         set +o errexit
+         TRYCOUNT=0
+         while [ $TRYCOUNT -le 20 ]; do
+             df | grep -q $TEST_BUCKET_MOUNT_POINT_1
+             if [ $? -eq 0 ]; then
+                 break;
+             fi
+             sleep 1
+             TRYCOUNT=`expr ${TRYCOUNT} + 1`
+         done
+         if [ $? -ne 0 ]; then
+             exit 1
+         fi
+         set -o errexit
+    else
+        retry 5 grep -q $TEST_BUCKET_MOUNT_POINT_1 /proc/mounts || exit 1
+    fi
 
     # Quick way to start system up for manual testing with options under test
     if [[ -n ${INTERACT} ]]; then
@@ -202,14 +219,21 @@ function start_s3fs {
 
 function stop_s3fs {
     # Retry in case file system is in use
-    if grep -q $TEST_BUCKET_MOUNT_POINT_1 /proc/mounts; then 
-        retry 10 grep -q $TEST_BUCKET_MOUNT_POINT_1 /proc/mounts && fusermount -u $TEST_BUCKET_MOUNT_POINT_1
+    if [ `uname` = "Darwin" ]; then
+        df | grep -q $TEST_BUCKET_MOUNT_POINT_1
+        if [ $? -eq 0 ]; then
+            retry 10 df | grep -q $TEST_BUCKET_MOUNT_POINT_1 && umount $TEST_BUCKET_MOUNT_POINT_1
+        fi
+    else
+        if grep -q $TEST_BUCKET_MOUNT_POINT_1 /proc/mounts; then 
+            retry 10 grep -q $TEST_BUCKET_MOUNT_POINT_1 /proc/mounts && fusermount -u $TEST_BUCKET_MOUNT_POINT_1
+        fi
     fi
 }
 
 # trap handlers do not stack.  If a test sets its own, the new handler should call common_exit_handler
 function common_exit_handler {
-    stop_s3proxy
     stop_s3fs
+    stop_s3proxy
 }
 trap common_exit_handler EXIT

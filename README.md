@@ -22,12 +22,12 @@ Features
 Installation
 ------------
 
-Ensure you have all the dependencies:
+* On Linux, ensure you have all the dependencies:
 
 On Ubuntu 14.04:
 
 ```
-sudo apt-get install automake autotools-dev g++ git libcurl4-gnutls-dev libfuse-dev libssl-dev libxml2-dev make pkg-config
+sudo apt-get install automake autotools-dev fuse g++ git libcurl4-gnutls-dev libfuse-dev libssl-dev libxml2-dev make pkg-config
 ```
 
 On CentOS 7:
@@ -36,7 +36,7 @@ On CentOS 7:
 sudo yum install automake fuse fuse-devel gcc-c++ git libcurl-devel libxml2-devel make openssl-devel
 ```
 
-Compile from master via the following commands:
+Then compile from master via the following commands:
 
 ```
 git clone https://github.com/s3fs-fuse/s3fs-fuse.git
@@ -47,18 +47,21 @@ make
 sudo make install
 ```
 
+* On Mac OS X, install via [Homebrew](http://brew.sh/):
+
+```ShellSession
+$ brew cask install osxfuse
+$ brew install s3fs
+```
+
 Examples
 --------
 
-Enter your S3 identity and credential in a file `/path/to/passwd`:
+Enter your S3 identity and credential in a file `/path/to/passwd` and set
+owner-only permissions:
 
 ```
 echo MYIDENTITY:MYCREDENTIAL > /path/to/passwd
-```
-
-Make sure the file has proper permissions (if you get 'permissions' error when mounting) `/path/to/passwd`:
-
-```
 chmod 600 /path/to/passwd
 ```
 
@@ -71,18 +74,37 @@ s3fs mybucket /path/to/mountpoint -o passwd_file=/path/to/passwd
 If you encounter any errors, enable debug output:
 
 ```
-s3fs mybucket /path/to/mountpoint -o passwd_file=/path/to/passwd -d -d -f -o f2 -o curldbg
+s3fs mybucket /path/to/mountpoint -o passwd_file=/path/to/passwd -o dbglevel=info -f -o curldbg
 ```
 
 You can also mount on boot by entering the following line to `/etc/fstab`:
 
 ```
 s3fs#mybucket /path/to/mountpoint fuse _netdev,allow_other 0 0
+```
 
 or
 
+```
 mybucket /path/to/mountpoint fuse.s3fs _netdev,allow_other 0 0
 ```
+
+If you use s3fs with a non-Amazon S3 implementation, specify the URL and path-style requests:
+
+```
+s3fs mybucket /path/to/mountpoint -o passwd_file=/path/to/passwd -o url=http://url.to.s3/ -o use_path_request_style
+```
+
+or(fstab)
+```
+s3fs#mybucket /path/to/mountpoint fuse _netdev,allow_other,use_path_request_style,url=http://url.to.s3/ 0 0
+```
+
+To use IBM IAM Authentication, use the `-o ibm_iam_auth` option, and specify the Service Instance ID and API Key in your credentials file:
+```
+echo SERVICEINSTANCEID:APIKEY > /path/to/passwd
+```
+The Service Instance ID is only required when using the `-o create_bucket` option.
 
 Note: You may also want to create the global credential file first
 
@@ -126,3 +148,4 @@ License
 Copyright (C) 2010 Randy Rizun <rrizun@gmail.com>
 
 Licensed under the GNU GPL version 2
+

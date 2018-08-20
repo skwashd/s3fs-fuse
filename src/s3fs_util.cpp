@@ -510,8 +510,17 @@ int is_uid_include_group(uid_t uid, gid_t gid)
     return -ENOMEM;
   }
   // get group information
-  if(0 != (result = getgrgid_r(gid, &ginfo, pbuf, maxlen, &pginfo))){
-    S3FS_PRN_ERR("could not get group information.");
+  while(ERANGE == (result = getgrgid_r(gid, &ginfo, pbuf, maxlen, &pginfo))){
+    free(pbuf);
+    maxlen *= 2;
+    if(NULL == (pbuf = (char*)malloc(sizeof(char) * maxlen))){
+      S3FS_PRN_CRIT("failed to allocate memory.");
+      return -ENOMEM;
+    }
+  }
+
+  if(0 != result){
+    S3FS_PRN_ERR("could not get group information(%d).", result);
     free(pbuf);
     return -result;
   }
@@ -1158,11 +1167,20 @@ void show_help (void)
     "   enable_content_md5 (default is disable)\n"
     "      - ensure data integrity during writes with MD5 hash.\n"
     "\n"
+    "   ecs\n"
+    "      - This option instructs s3fs to query the ECS container credential\n"
+    "      metadata address instead of the instance metadata address.\n"
+    "\n"
     "   iam_role (default is no IAM role)\n"
     "      - This option requires the IAM role name or \"auto\". If you specify\n"
     "      \"auto\", s3fs will automatically use the IAM role names that are set\n"
     "      to an instance. If you specify this option without any argument, it\n"
     "      is the same as that you have specified the \"auto\".\n"
+    "\n"
+    "   ibm_iam_auth\n"
+    "      - This option instructs s3fs to use IBM IAM authentication.\n"
+    "      In this mode, the AWSAccessKey and AWSSecretKey will be used as\n"
+    "      IBM's Service-Instance-ID and APIKey, respectively.\n"
     "\n"
     "   use_xattr (default is not handling the extended attribute)\n"
     "      Enable to handle the extended attribute(xattrs).\n"
