@@ -405,7 +405,7 @@ class S3fsCurl
 
     // methods
     bool CreateCurlHandle(bool force = false);
-    bool DestroyCurlHandle(void);
+    bool DestroyCurlHandle(bool force = false);
 
     bool LoadIAMRoleFromMetaData(void);
     bool AddSseRequestHead(sse_type_t ssetype, std::string& ssevalue, bool is_only_c, bool is_copy);
@@ -439,6 +439,7 @@ class S3fsCurl
     std::string GetBasePath(void) const { return base_path; }
     std::string GetSpacialSavedPath(void) const { return saved_path; }
     std::string GetUrl(void) const { return url; }
+    std::string GetOp(void) const { return op; }
     headers_t* GetResponseHeaders(void) { return &responseHeaders; }
     BodyData* GetBodyData(void) const { return bodydata; }
     BodyData* GetHeadData(void) const { return headdata; }
