@@ -1,6 +1,10 @@
 s3fs-fuse (1.84-2) UNRELEASED; urgency=medium
 
+  [ Andrii Senkovych ]
   * d/gbp.conf: revert to default upstream tag name format.
+
+  [ Ondřej Nový ]
+  * d/copyright: Change Format URL to correct one
 
  -- Andrii Senkovych <andrii@senkovych.com>  Sun, 26 Aug 2018 13:03:10 +0300
 
