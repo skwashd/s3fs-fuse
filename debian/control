@@ -3,7 +3,7 @@ Section: utils
 Priority: optional
 Maintainer: Andrii Senkovych <andrii@senkovych.com>
 Uploaders: Mattia Rizzolo <mattia@debian.org>
-Build-Depends: debhelper (>= 11~),
+Build-Depends: debhelper (>= 12~),
                libcurl4-gnutls-dev,
                libfuse-dev,
                libgcrypt20-dev,
