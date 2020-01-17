@@ -10,7 +10,7 @@ License: GPL-2+
 
 Files: debian/*
 Copyright: 2014-2017 Andriy Senkovych <jolly_roger@itblog.org.ua>
-           2016-2017 Mattia Rizzolo <mattia@debian.org>
+           2016-2020 Mattia Rizzolo <mattia@debian.org>
 License: GPL-2+
 
 Files: autogen.sh
