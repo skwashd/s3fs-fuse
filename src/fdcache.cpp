@@ -30,7 +30,6 @@
 #include <syslog.h>
 #include <errno.h>
 #include <string.h>
-#include <assert.h>
 #include <dirent.h>
 #include <curl/curl.h>
 #include <string>
@@ -89,7 +88,7 @@ bool CacheFileStat::MakeCacheFileStatPath(const char* path, string& sfile_path, 
   return true;
 }
 
-bool CacheFileStat::CheckCacheFileStatTopDir(void)
+bool CacheFileStat::CheckCacheFileStatTopDir()
 {
   if(!FdManager::IsCacheDir()){
     return true;
@@ -129,7 +128,7 @@ bool CacheFileStat::DeleteCacheFileStat(const char* path)
 // If remove stat file directory, it should do before removing
 // file cache directory.
 //
-bool CacheFileStat::DeleteCacheFileStatDirectory(void)
+bool CacheFileStat::DeleteCacheFileStatDirectory()
 {
   string top_path = FdManager::GetCacheDir();
 
@@ -175,9 +174,9 @@ bool CacheFileStat::SetPath(const char* tpath, bool is_open)
   return Open();
 }
 
-bool CacheFileStat::Open(void)
+bool CacheFileStat::Open()
 {
-  if(0 == path.size()){
+  if(path.empty()){
     return false;
   }
   if(-1 != fd){
@@ -215,7 +214,7 @@ bool CacheFileStat::Open(void)
   return true;
 }
 
-bool CacheFileStat::Release(void)
+bool CacheFileStat::Release()
 {
   if(-1 == fd){
     // already release
@@ -258,7 +257,7 @@ PageList::~PageList()
   Clear();
 }
 
-void PageList::Clear(void)
+void PageList::Clear()
 {
   PageList::FreeList(pages);
 }
@@ -271,7 +270,7 @@ bool PageList::Init(size_t size, bool is_loaded)
   return true;
 }
 
-size_t PageList::Size(void) const
+size_t PageList::Size() const
 {
   if(pages.empty()){
     return 0;
@@ -280,7 +279,7 @@ size_t PageList::Size(void) const
   return static_cast<size_t>((*riter)->next());
 }
 
-bool PageList::Compress(void)
+bool PageList::Compress()
 {
   bool is_first       = true;
   bool is_last_loaded = false;
@@ -504,7 +503,7 @@ bool PageList::Serialize(CacheFileStat& file, bool is_output)
     //
     // put to file
     //
-    stringstream ssall;
+    ostringstream ssall;
     ssall << Size();
 
     for(fdpage_list_t::iterator iter = pages.begin(); iter != pages.end(); ++iter){
@@ -544,8 +543,8 @@ bool PageList::Serialize(CacheFileStat& file, bool is_output)
       free(ptmp);
       return false;
     }
-    string       oneline;
-    stringstream ssall(ptmp);
+    string        oneline;
+    istringstream ssall(ptmp);
 
     // loaded
     Clear();
@@ -561,8 +560,8 @@ bool PageList::Serialize(CacheFileStat& file, bool is_output)
     // load each part
     bool is_err = false;
     while(getline(ssall, oneline, '\n')){
-      string       part;
-      stringstream ssparts(oneline);
+      string        part;
+      istringstream ssparts(oneline);
       // offset
       if(!getline(ssparts, part, ':')){
         is_err = true;
@@ -601,7 +600,7 @@ bool PageList::Serialize(CacheFileStat& file, bool is_output)
   return true;
 }
 
-void PageList::Dump(void)
+void PageList::Dump()
 {
   int cnt = 0;
 
@@ -661,12 +660,12 @@ FdEntity::~FdEntity()
   }
 }
 
-void FdEntity::Clear(void)
+void FdEntity::Clear()
 {
   AutoLock auto_lock(&fdent_lock);
 
   if(-1 != fd){
-    if(0 != cachepath.size()){
+    if(!cachepath.empty()){
       CacheFileStat cfstat(path.c_str());
       if(!pagelist.Serialize(cfstat, true)){
         S3FS_PRN_WARN("failed to save cache stat file(%s).", path.c_str());
@@ -692,7 +691,7 @@ void FdEntity::Clear(void)
   is_modify     = false;
 }
 
-void FdEntity::Close(void)
+void FdEntity::Close()
 {
   S3FS_PRN_DBG("[path=%s][fd=%d][refcnt=%d]", path.c_str(), fd, (-1 != fd ? refcnt - 1 : refcnt));
 
@@ -701,9 +700,12 @@ void FdEntity::Close(void)
 
     if(0 < refcnt){
       refcnt--;
+    }else{
+      S3FS_PRN_EXIT("reference count underflow");
+      abort();
     }
     if(0 == refcnt){
-      if(0 != cachepath.size()){
+      if(!cachepath.empty()){
         CacheFileStat cfstat(path.c_str());
         if(!pagelist.Serialize(cfstat, true)){
           S3FS_PRN_WARN("failed to save cache stat file(%s).", path.c_str());
@@ -739,7 +741,7 @@ int FdEntity::Dup()
 //
 // Open mirror file which is linked cache file.
 //
-int FdEntity::OpenMirrorFile(void)
+int FdEntity::OpenMirrorFile()
 {
   if(cachepath.empty()){
     S3FS_PRN_ERR("cache path is empty, why come here");
@@ -812,11 +814,17 @@ int FdEntity::Open(headers_t* pmeta, ssize_t size, time_t time, bool no_fd_lock_
       // truncate temporary file size
       if(-1 == ftruncate(fd, static_cast<size_t>(size))){
         S3FS_PRN_ERR("failed to truncate temporary file(%d) by errno(%d).", fd, errno);
+        if(0 < refcnt){
+          refcnt--;
+        }
         return -EIO;
       }
       // resize page list
       if(!pagelist.Resize(static_cast<size_t>(size), false)){
         S3FS_PRN_ERR("failed to truncate temporary file information(%d).", fd);
+        if(0 < refcnt){
+          refcnt--;
+        }
         return -EIO;
       }
     }
@@ -835,7 +843,7 @@ int FdEntity::Open(headers_t* pmeta, ssize_t size, time_t time, bool no_fd_lock_
   bool  need_save_csf = false;  // need to save(reset) cache stat file
   bool  is_truncate   = false;  // need to truncate
 
-  if(0 != cachepath.size()){
+  if(!cachepath.empty()){
     // using cache
 
     // open cache and cache stat file, load page info.
@@ -1040,7 +1048,7 @@ int FdEntity::SetMtime(time_t time)
       S3FS_PRN_ERR("futimes failed. errno(%d)", errno);
       return -errno;
     }
-  }else if(0 < cachepath.size()){
+  }else if(!cachepath.empty()){
     // not opened file yet.
     struct utimbuf n_mtime;
     n_mtime.modtime = time;
@@ -1050,18 +1058,31 @@ int FdEntity::SetMtime(time_t time)
       return -errno;
     }
   }
+  orgmeta["x-amz-meta-ctime"] = str(time);
   orgmeta["x-amz-meta-mtime"] = str(time);
 
   return 0;
 }
 
-bool FdEntity::UpdateMtime(void)
+bool FdEntity::UpdateCtime()
 {
   AutoLock auto_lock(&fdent_lock);
   struct stat st;
   if(!GetStats(st)){
     return false;
   }
+  orgmeta["x-amz-meta-ctime"] = str(st.st_ctime);
+  return true;
+}
+
+bool FdEntity::UpdateMtime()
+{
+  AutoLock auto_lock(&fdent_lock);
+  struct stat st;
+  if(!GetStats(st)){
+    return false;
+  }
+  orgmeta["x-amz-meta-ctime"] = str(st.st_ctime);
   orgmeta["x-amz-meta-mtime"] = str(st.st_mtime);
   return true;
 }
@@ -1225,7 +1246,7 @@ int FdEntity::NoCacheLoadAndPost(off_t start, size_t size)
   // [NOTE]
   // This method calling means that the cache file is never used no more.
   //
-  if(0 != cachepath.size()){
+  if(!cachepath.empty()){
     // remove cache files(and cache stat file)
     FdManager::DeleteCacheFile(path.c_str());
     // cache file path does not use no more.
@@ -1378,7 +1399,7 @@ int FdEntity::NoCacheLoadAndPost(off_t start, size_t size)
 // At no disk space for caching object.
 // This method is starting multipart uploading.
 //
-int FdEntity::NoCachePreMultipartPost(void)
+int FdEntity::NoCachePreMultipartPost()
 {
   // initialize multipart upload values
   upload_id.erase();
@@ -1411,7 +1432,7 @@ int FdEntity::NoCacheMultipartPost(int tgfd, off_t start, size_t size)
 // At no disk space for caching object.
 // This method is finishing multipart uploading.
 //
-int FdEntity::NoCacheCompleteMultipartPost(void)
+int FdEntity::NoCacheCompleteMultipartPost()
 {
   if(upload_id.empty() || etaglist.empty()){
     S3FS_PRN_ERR("There is no upload id or etag list.");
@@ -1459,7 +1480,7 @@ int FdEntity::RowFlush(const char* tpath, bool force_sync)
         // enough disk space
         // Load all uninitialized area
         result = Load();
-        FdManager::get()->FreeReservedDiskSpace(restsize);
+        FdManager::FreeReservedDiskSpace(restsize);
         if(0 != result){
           S3FS_PRN_ERR("failed to upload all area(errno=%d)", result);
           return static_cast<ssize_t>(result);
@@ -1496,6 +1517,7 @@ int FdEntity::RowFlush(const char* tpath, bool force_sync)
      */
     if(pagelist.Size() > static_cast<size_t>(MAX_MULTIPART_CNT * S3fsCurl::GetMultipartSize())){
       // close f ?
+      S3FS_PRN_ERR("Part count exceeds %d.  Increase multipart size and try again.", MAX_MULTIPART_CNT);
       return -ENOTSUP;
     }
 
@@ -1633,7 +1655,7 @@ ssize_t FdEntity::Read(char* bytes, off_t start, size_t size, bool force_load)
       result = Load(start, load_size);
     }
 
-    FdManager::get()->FreeReservedDiskSpace(load_size);
+    FdManager::FreeReservedDiskSpace(load_size);
 
     if(0 != result){
       S3FS_PRN_ERR("could not download. start(%jd), size(%zu), errno(%d)", (intmax_t)start, size, result);
@@ -1685,7 +1707,7 @@ ssize_t FdEntity::Write(const char* bytes, off_t start, size_t size)
       if(0 < start){
         result = Load(0, static_cast<size_t>(start));
       }
-      FdManager::get()->FreeReservedDiskSpace(restsize);
+      FdManager::FreeReservedDiskSpace(restsize);
       if(0 != result){
         S3FS_PRN_ERR("failed to load uninitialized area before writing(errno=%d)", result);
         return static_cast<ssize_t>(result);
@@ -1718,6 +1740,15 @@ ssize_t FdEntity::Write(const char* bytes, off_t start, size_t size)
   }
   if(0 < wsize){
     pagelist.SetPageLoadedStatus(start, static_cast<size_t>(wsize), true);
+  }
+
+  // Load uninitialized area which starts from (start + size) to EOF after writing.
+  if(pagelist.Size() > static_cast<size_t>(start) + size){
+    result = Load(static_cast<size_t>(start + size), pagelist.Size());
+    if(0 != result){
+      S3FS_PRN_ERR("failed to load uninitialized area after writing(errno=%d)", result);
+      return static_cast<ssize_t>(result);
+    }
   }
 
   // check multipart uploading
@@ -1753,7 +1784,7 @@ void FdEntity::CleanupCache()
   }
 
   if (is_modify) {
-    // cache is not commited to s3, cannot cleanup
+    // cache is not committed to s3, cannot cleanup
     return;
   }
 
@@ -1786,7 +1817,7 @@ pthread_mutex_t FdManager::fd_manager_lock;
 pthread_mutex_t FdManager::cache_cleanup_lock;
 pthread_mutex_t FdManager::reserved_diskspace_lock;
 bool            FdManager::is_lock_init(false);
-string          FdManager::cache_dir("");
+string          FdManager::cache_dir;
 bool            FdManager::check_cache_dir_exist(false);
 size_t          FdManager::free_disk_space = 0;
 
@@ -1803,16 +1834,26 @@ bool FdManager::SetCacheDir(const char* dir)
   return true;
 }
 
-bool FdManager::DeleteCacheDirectory(void)
+bool FdManager::DeleteCacheDirectory()
 {
-  if(0 == FdManager::cache_dir.size()){
+  if(FdManager::cache_dir.empty()){
     return true;
   }
-  string cache_dir;
-  if(!FdManager::MakeCachePath(NULL, cache_dir, false)){
+
+  string cache_path;
+  if(!FdManager::MakeCachePath(NULL, cache_path, false)){
     return false;
   }
-  return delete_files_in_dir(cache_dir.c_str(), true);
+  if(!delete_files_in_dir(cache_path.c_str(), true)){
+    return false;
+  }
+
+  string mirror_path = FdManager::cache_dir + "/." + bucket + ".mirror";
+  if(!delete_files_in_dir(mirror_path.c_str(), true)){
+    return false;
+  }
+
+  return true;
 }
 
 int FdManager::DeleteCacheFile(const char* path)
@@ -1822,10 +1863,10 @@ int FdManager::DeleteCacheFile(const char* path)
   if(!path){
     return -EIO;
   }
-  if(0 == FdManager::cache_dir.size()){
+  if(FdManager::cache_dir.empty()){
     return 0;
   }
-  string cache_path = "";
+  string cache_path;
   if(!FdManager::MakeCachePath(path, cache_path, false)){
     return 0;
   }
@@ -1855,7 +1896,7 @@ int FdManager::DeleteCacheFile(const char* path)
 
 bool FdManager::MakeCachePath(const char* path, string& cache_path, bool is_create_dir, bool is_mirror_path)
 {
-  if(0 == FdManager::cache_dir.size()){
+  if(FdManager::cache_dir.empty()){
     cache_path = "";
     return true;
   }
@@ -1885,9 +1926,9 @@ bool FdManager::MakeCachePath(const char* path, string& cache_path, bool is_crea
   return true;
 }
 
-bool FdManager::CheckCacheTopDir(void)
+bool FdManager::CheckCacheTopDir()
 {
-  if(0 == FdManager::cache_dir.size()){
+  if(FdManager::cache_dir.empty()){
     return true;
   }
   string toppath(FdManager::cache_dir + "/" + bucket);
@@ -1912,12 +1953,12 @@ bool FdManager::SetCheckCacheDirExist(bool is_check)
   return old;
 }
 
-bool FdManager::CheckCacheDirExist(void)
+bool FdManager::CheckCacheDirExist()
 {
   if(!FdManager::check_cache_dir_exist){
     return true;
   }
-  if(0 == FdManager::cache_dir.size()){
+  if(FdManager::cache_dir.empty()){
     return true;
   }
   // check the directory
@@ -1944,7 +1985,7 @@ uint64_t FdManager::GetFreeDiskSpace(const char* path)
 {
   struct statvfs vfsbuf;
   string         ctoppath;
-  if(0 < FdManager::cache_dir.size()){
+  if(!FdManager::cache_dir.empty()){
     ctoppath = FdManager::cache_dir + "/";
     ctoppath = get_exist_directory_path(ctoppath);	// existed directory
     if(ctoppath != "/"){
@@ -1987,7 +2028,7 @@ FdManager::FdManager()
       S3FS_PRN_CRIT("failed to init mutex");
     }
   }else{
-    assert(false);
+    abort();
   }
 }
 
@@ -2011,7 +2052,7 @@ FdManager::~FdManager()
       FdManager::is_lock_init = false;
     }
   }else{
-    assert(false);
+    abort();
   }
 }
 
@@ -2026,6 +2067,7 @@ FdEntity* FdManager::GetFdEntity(const char* path, int existfd)
 
   fdent_map_t::iterator iter = fent.find(string(path));
   if(fent.end() != iter && (-1 == existfd || (*iter).second->GetFd() == existfd)){
+    iter->second->Dup();
     return (*iter).second;
   }
 
@@ -2034,6 +2076,7 @@ FdEntity* FdManager::GetFdEntity(const char* path, int existfd)
       if((*iter).second && (*iter).second->GetFd() == existfd){
         // found opened fd in map
         if(0 == strcmp((*iter).second->GetPath(), path)){
+          iter->second->Dup();
           return (*iter).second;
         }
         // found fd, but it is used another file(file descriptor is recycled)
@@ -2052,6 +2095,7 @@ FdEntity* FdManager::Open(const char* path, headers_t* pmeta, ssize_t size, time
   if(!path || '\0' == path[0]){
     return NULL;
   }
+  bool close = false;
   FdEntity* ent;
   {
     AutoLock auto_lock(&FdManager::fd_manager_lock);
@@ -2075,10 +2119,12 @@ FdEntity* FdManager::Open(const char* path, headers_t* pmeta, ssize_t size, time
     if(fent.end() != iter){
       // found
       ent = (*iter).second;
+      ent->Dup();
+      close = true;
 
     }else if(is_create){
       // not found
-      string cache_path = "";
+      string cache_path;
       if(!force_tmpfile && !FdManager::MakeCachePath(path, cache_path, true)){
         S3FS_PRN_ERR("failed to make cache path for object(%s).", path);
         return NULL;
@@ -2086,7 +2132,7 @@ FdEntity* FdManager::Open(const char* path, headers_t* pmeta, ssize_t size, time
       // make new obj
       ent = new FdEntity(path, cache_path.c_str());
 
-      if(0 < cache_path.size()){
+      if(!cache_path.empty()){
         // using cache
         fent[string(path)] = ent;
       }else{
@@ -2097,7 +2143,7 @@ FdEntity* FdManager::Open(const char* path, headers_t* pmeta, ssize_t size, time
         // The reason why this process here, please look at the definition of the
         // comments of NOCACHE_PATH_PREFIX_FORM symbol.
         //
-        string tmppath("");
+        string tmppath;
         FdManager::MakeRandomTempPath(path, tmppath);
         fent[tmppath] = ent;
       }
@@ -2108,7 +2154,13 @@ FdEntity* FdManager::Open(const char* path, headers_t* pmeta, ssize_t size, time
 
   // open
   if(0 != ent->Open(pmeta, size, time, no_fd_lock_wait)){
+    if(close){
+      ent->Close();
+    }
     return NULL;
+  }
+  if(close){
+    ent->Close();
   }
   return ent;
 }
@@ -2196,7 +2248,7 @@ bool FdManager::ChangeEntityToTempPath(FdEntity* ent, const char* path)
     if((*iter).second == ent){
       fent.erase(iter++);
 
-      string tmppath("");
+      string tmppath;
       FdManager::MakeRandomTempPath(path, tmppath);
       fent[tmppath] = ent;
     }else{

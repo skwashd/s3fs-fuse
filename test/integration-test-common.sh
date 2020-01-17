@@ -50,7 +50,7 @@ export S3_URL
 export TEST_SCRIPT_DIR=`pwd`
 export TEST_BUCKET_MOUNT_POINT_1=${TEST_BUCKET_1}
 
-S3PROXY_VERSION="1.6.0"
+S3PROXY_VERSION="1.6.1"
 S3PROXY_BINARY=${S3PROXY_BINARY-"s3proxy-${S3PROXY_VERSION}"}
 
 if [ ! -f "$S3FS_CREDENTIALS_FILE" ]
@@ -146,14 +146,14 @@ function start_s3fs {
     # If VALGRIND is set, pass it as options to valgrind.
     # start valgrind-listener in another shell. 
     # eg: VALGRIND="--tool=memcheck --leak-check=full" ./small-integration-test.sh
-    # Start valgind-listener (default port is 1500)
+    # Start valgrind-listener (default port is 1500)
     if [ -n "${VALGRIND}" ]; then
         VALGRIND_EXEC="valgrind ${VALGRIND} --log-socket=127.0.1.1"
     fi
 
     # Common s3fs options:
     #
-    # TODO: Allow all these options to be overriden with env variables
+    # TODO: Allow all these options to be overridden with env variables
     #
     # use_path_request_style
     #     The test env doesn't have virtual hosts
@@ -181,6 +181,7 @@ function start_s3fs {
             -o url=${S3_URL} \
             -o no_check_certificate \
             -o ssl_verify_hostname=0 \
+            -o use_xattr=1 \
             -o createbucket \
             ${AUTH_OPT} \
             -o dbglevel=${DBGLEVEL:=info} \

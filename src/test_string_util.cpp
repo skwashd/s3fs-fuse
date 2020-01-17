@@ -75,9 +75,47 @@ void test_base64()
   // TODO: invalid input
 }
 
+void test_strtoofft()
+{
+  ASSERT_EQUALS(s3fs_strtoofft("0"), static_cast<off_t>(0L));
+  ASSERT_EQUALS(s3fs_strtoofft("9"), static_cast<off_t>(9L));
+  ASSERT_EQUALS(s3fs_strtoofft("A"), static_cast<off_t>(0L));
+  ASSERT_EQUALS(s3fs_strtoofft("A", /*is_base_16=*/ true), static_cast<off_t>(10L));
+  ASSERT_EQUALS(s3fs_strtoofft("F", /*is_base_16=*/ true), static_cast<off_t>(15L));
+  ASSERT_EQUALS(s3fs_strtoofft("a", /*is_base_16=*/ true), static_cast<off_t>(10L));
+  ASSERT_EQUALS(s3fs_strtoofft("f", /*is_base_16=*/ true), static_cast<off_t>(15L));
+  ASSERT_EQUALS(s3fs_strtoofft("deadbeef", /*is_base_16=*/ true), static_cast<off_t>(3735928559L));
+}
+
+void test_wtf8_encoding()
+{
+  std::string ascii("normal string");
+  std::string utf8("Hyld\xc3\xbdpi \xc3\xbej\xc3\xb3\xc3\xb0""f\xc3\xa9lagsins vex \xc3\xbar k\xc3\xa6rkomnu b\xc3\xb6li \xc3\xad \xc3\xa1st");
+  std::string cp1252("Hyld\xfdpi \xfej\xf3\xf0""f\xe9lagsins vex \xfar k\xe6rkomnu b\xf6li \xed \xe1st");
+  std::string broken = utf8;
+  broken[14] = 0x97;
+  std::string mixed = ascii + utf8 + cp1252;
+
+  ASSERT_EQUALS(s3fs_wtf8_encode(ascii), ascii);
+  ASSERT_EQUALS(s3fs_wtf8_decode(ascii), ascii);
+  ASSERT_EQUALS(s3fs_wtf8_encode(utf8), utf8);
+  ASSERT_EQUALS(s3fs_wtf8_decode(utf8), utf8);
+
+  ASSERT_NEQUALS(s3fs_wtf8_encode(cp1252), cp1252);
+  ASSERT_EQUALS(s3fs_wtf8_decode(s3fs_wtf8_encode(cp1252)), cp1252);
+
+  ASSERT_NEQUALS(s3fs_wtf8_encode(broken), broken);
+  ASSERT_EQUALS(s3fs_wtf8_decode(s3fs_wtf8_encode(broken)), broken);
+
+  ASSERT_NEQUALS(s3fs_wtf8_encode(mixed), mixed);
+  ASSERT_EQUALS(s3fs_wtf8_decode(s3fs_wtf8_encode(mixed)), mixed);
+}
+
 int main(int argc, char *argv[])
 {
   test_trim();
   test_base64();
+  test_strtoofft();
+  test_wtf8_encoding();
   return 0;
 }

@@ -22,7 +22,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <syslog.h>
-#include <assert.h>
 #include <curl/curl.h>
 #include <sstream>
 #include <fstream>
@@ -56,7 +55,7 @@ AdditionalHeader::AdditionalHeader()
   if(this == AdditionalHeader::get()){
     is_enable = false;
   }else{
-    assert(false);
+    abort();
   }
 }
 
@@ -65,7 +64,7 @@ AdditionalHeader::~AdditionalHeader()
   if(this == AdditionalHeader::get()){
     Unload();
   }else{
-    assert(false);
+    abort();
   }
 }
 
@@ -90,14 +89,14 @@ bool AdditionalHeader::Load(const char* file)
     if('#' == line[0]){
       continue;
     }
-    if(0 == line.size()){
+    if(line.empty()){
       continue;
     }
     // load a line
-    stringstream ss(line);
-    string       key("");       // suffix(key)
-    string       head;          // additional HTTP header
-    string       value;         // header value
+    istringstream ss(line);
+    string        key;           // suffix(key)
+    string        head;          // additional HTTP header
+    string        value;         // header value
     if(0 == isblank(line[0])){
       ss >> key;
     }
@@ -109,8 +108,8 @@ bool AdditionalHeader::Load(const char* file)
     }
 
     // check it
-    if(0 == head.size()){
-      if(0 == key.size()){
+    if(head.empty()){
+      if(key.empty()){
         continue;
       }
       S3FS_PRN_ERR("file format error: %s key(suffix) is no HTTP header value.", key.c_str());
@@ -123,6 +122,7 @@ bool AdditionalHeader::Load(const char* file)
       // regex
       if(key.size() <= strlen(ADD_HEAD_REGEX)){
         S3FS_PRN_ERR("file format error: %s key(suffix) does not have key string.", key.c_str());
+        delete paddhead;
         continue;
       }
       key = key.substr(strlen(ADD_HEAD_REGEX));
@@ -164,7 +164,7 @@ bool AdditionalHeader::Load(const char* file)
   return true;
 }
 
-void AdditionalHeader::Unload(void)
+void AdditionalHeader::Unload()
 {
   is_enable = false;
 
@@ -239,14 +239,14 @@ struct curl_slist* AdditionalHeader::AddHeader(struct curl_slist* list, const ch
   return list;
 }
 
-bool AdditionalHeader::Dump(void) const
+bool AdditionalHeader::Dump() const
 {
   if(!IS_S3FS_LOG_DBG()){
     return true;
   }
 
-  stringstream ssdbg;
-  int          cnt = 1;
+  ostringstream ssdbg;
+  int           cnt = 1;
 
   ssdbg << "Additional Header list[" << addheadlist.size() << "] = {" << endl;
 

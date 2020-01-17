@@ -35,6 +35,7 @@ static inline int STR2NCMP(const char *str1, const char *str2) { return strncmp(
 
 template <class T> std::string str(T value);
 
+// Convert string to off_t.  Does not signal invalid input.
 off_t s3fs_strtoofft(const char* str, bool is_base_16 = false);
 
 std::string trim_left(const std::string &s, const std::string &t = SPACES);
@@ -45,6 +46,8 @@ std::string get_date_rfc850(void);
 void get_date_sigv3(std::string& date, std::string& date8601);
 std::string get_date_string(time_t tm);
 std::string get_date_iso8601(time_t tm);
+bool get_unixtime_from_iso8601(const char* pdate, time_t& unixtime);
+bool convert_unixtime_from_option_arg(const char* argv, time_t& unixtime);
 std::string urlEncode(const std::string &s);
 std::string urlEncode2(const std::string &s);
 std::string urlDecode(const std::string& s);
@@ -54,6 +57,11 @@ bool get_keyword_value(std::string& target, const char* keyword, std::string& va
 std::string s3fs_hex(const unsigned char* input, size_t length);
 char* s3fs_base64(const unsigned char* input, size_t length);
 unsigned char* s3fs_decode64(const char* input, size_t* plength);
+
+bool s3fs_wtf8_encode(const char *s, std::string *result);
+std::string s3fs_wtf8_encode(const std::string &s);
+bool s3fs_wtf8_decode(const char *s, std::string *result);
+std::string s3fs_wtf8_decode(const std::string &s);
 
 #endif // S3FS_STRING_UTIL_H_
 

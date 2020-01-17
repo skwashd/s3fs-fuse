@@ -155,6 +155,7 @@ class FdEntity
 
     bool GetStats(struct stat& st);
     int SetMtime(time_t time);
+    bool UpdateCtime(void);
     bool UpdateMtime(void);
     bool GetSize(size_t& size);
     bool SetMode(mode_t mode);
@@ -224,6 +225,7 @@ class FdManager
     static void FreeReservedDiskSpace(size_t size);
     bool ReserveDiskSpace(size_t size);
 
+    // Return FdEntity associated with path, returning NULL on error.  This operation increments the reference count; callers must decrement via Close after use.
     FdEntity* GetFdEntity(const char* path, int existfd = -1);
     FdEntity* Open(const char* path, headers_t* pmeta = NULL, ssize_t size = -1, time_t time = -1, bool force_tmpfile = false, bool is_create = true, bool no_fd_lock_wait = false);
     FdEntity* ExistOpen(const char* path, int existfd = -1, bool ignore_existfd = false);

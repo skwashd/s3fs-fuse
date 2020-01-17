@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <syslog.h>
+#include <time.h>
 
 #include <sstream>
 #include <string>
@@ -33,7 +34,7 @@
 using namespace std;
 
 template <class T> std::string str(T value) {
-  std::stringstream s;
+  std::ostringstream s;
   s << value;
   return s.str();
 }
@@ -75,7 +76,7 @@ off_t s3fs_strtoofft(const char* str, bool is_base_16)
     }
     // check like isalnum and set data
     result *= (is_base_16 ? 16 : 10);
-    if('0' <= *str || '9' < *str){
+    if('0' <= *str && '9' >= *str){
       result += static_cast<off_t>(*str - '0');
     }else if(is_base_16){
       if('A' <= *str && *str <= 'F'){
@@ -120,8 +121,7 @@ string trim_right(const string &s, const string &t /* = SPACES */)
 
 string trim(const string &s, const string &t /* = SPACES */)
 {
-  string d(s);
-  return trim_left(trim_right(d, t), t);
+  return trim_left(trim_right(s, t), t);
 }
 
 /**
@@ -210,15 +210,15 @@ bool takeout_str_dquart(string& str)
   size_t pos;
 
   // '"' for start
-  if(string::npos != (pos = str.find_first_of("\""))){
+  if(string::npos != (pos = str.find_first_of('\"'))){
     str = str.substr(pos + 1);
 
     // '"' for end
-    if(string::npos == (pos = str.find_last_of("\""))){
+    if(string::npos == (pos = str.find_last_of('\"'))){
       return false;
     }
     str = str.substr(0, pos);
-    if(string::npos != str.find_first_of("\"")){
+    if(string::npos != str.find_first_of('\"')){
       return false;
     }
   }
@@ -284,6 +284,75 @@ string get_date_iso8601(time_t tm)
   return buf;
 }
 
+bool get_unixtime_from_iso8601(const char* pdate, time_t& unixtime)
+{
+  if(!pdate){
+    return false;
+  }
+
+  struct tm tm;
+  char*     prest = strptime(pdate, "%Y-%m-%dT%T", &tm);
+  if(prest == pdate){
+    // wrong format
+    return false;
+  }
+  unixtime = mktime(&tm);
+  return true;
+}
+
+//
+// Convert to unixtime from string which formatted by following:
+//   "12Y12M12D12h12m12s", "86400s", "9h30m", etc
+//
+bool convert_unixtime_from_option_arg(const char* argv, time_t& unixtime)
+{
+  if(!argv){
+    return false;
+  }
+  unixtime = 0;
+  const char* ptmp;
+  int         last_unit_type = 0;       // unit flag.
+  bool        is_last_number;
+  time_t      tmptime;
+  for(ptmp = argv, is_last_number = true, tmptime = 0; ptmp && *ptmp; ++ptmp){
+    if('0' <= *ptmp && *ptmp <= '9'){
+      tmptime        *= 10;
+      tmptime        += static_cast<time_t>(*ptmp - '0');
+      is_last_number  = true;
+    }else if(is_last_number){
+      if('Y' == *ptmp && 1 > last_unit_type){
+        unixtime      += (tmptime * (60 * 60 * 24 * 365));   // average 365 day / year
+        last_unit_type = 1;
+      }else if('M' == *ptmp && 2 > last_unit_type){
+        unixtime      += (tmptime * (60 * 60 * 24 * 30));    // average 30 day / month
+        last_unit_type = 2;
+      }else if('D' == *ptmp && 3 > last_unit_type){
+        unixtime      += (tmptime * (60 * 60 * 24));
+        last_unit_type = 3;
+      }else if('h' == *ptmp && 4 > last_unit_type){
+        unixtime      += (tmptime * (60 * 60));
+        last_unit_type = 4;
+      }else if('m' == *ptmp && 5 > last_unit_type){
+        unixtime      += (tmptime * 60);
+        last_unit_type = 5;
+      }else if('s' == *ptmp && 6 > last_unit_type){
+        unixtime      += tmptime;
+        last_unit_type = 6;
+      }else{
+        return false;
+      }
+      tmptime        = 0;
+      is_last_number = false;
+    }else{
+      return false;
+    }
+  }
+  if(is_last_number){
+    return false;
+  }
+  return true;
+}
+
 std::string s3fs_hex(const unsigned char* input, size_t length)
 {
   std::string hex;
@@ -300,7 +369,7 @@ char* s3fs_base64(const unsigned char* input, size_t length)
   static const char* base = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
   char* result;
 
-  if(!input || 0 >= length){
+  if(!input || 0 == length){
     return NULL;
   }
   if(NULL == (result = reinterpret_cast<char*>(malloc((((length / 3) + 1) * 4 + 1) * sizeof(char))))){
@@ -379,6 +448,132 @@ unsigned char* s3fs_decode64(const char* input, size_t* plength)
   }
   result[wpos] = '\0';
   *plength = wpos;
+  return result;
+}
+
+/*
+ * detect and rewrite invalid utf8.  We take invalid bytes
+ * and encode them into a private region of the unicode
+ * space.  This is sometimes known as wtf8, wobbly transformation format.
+ * it is necessary because S3 validates the utf8 used for identifiers for
+ * correctness, while some clients may provide invalid utf, notably
+ * windows using cp1252.
+ */
+
+// Base location for transform.  The range 0xE000 - 0xF8ff
+// is a private range, se use the start of this range.
+static unsigned int escape_base = 0xe000;
+
+// encode bytes into wobbly utf8.  
+// 'result' can be null. returns true if transform was needed.
+bool s3fs_wtf8_encode(const char *s, string *result)
+{
+  bool invalid = false;
+
+  // Pass valid utf8 code through
+  for (; *s; s++) {
+    const unsigned char c = *s;
+
+    // single byte encoding
+    if (c <= 0x7f) {
+      if (result)
+	*result += c;
+      continue;
+    }
+
+    // otherwise, it must be one of the valid start bytes
+    if ( c >= 0xc2 && c <= 0xf5 ) {
+
+      // two byte encoding
+      // don't need bounds check, string is zero terminated
+      if ((c & 0xe0) == 0xc0 && (s[1] & 0xc0) == 0x80) {
+        // all two byte encodings starting higher than c1 are valid
+        if (result) {
+          *result += c;
+          *result += *(++s);
+        }
+        continue;
+      } 
+      // three byte encoding
+      if ((c & 0xf0) == 0xe0 && (s[1] & 0xc0) == 0x80 && (s[2] & 0xc0) == 0x80) {
+        const unsigned code = ((c & 0x0f) << 12) | ((s[1] & 0x3f) << 6) | (s[2] & 0x3f);
+        if (code >= 0x800 && ! (code >= 0xd800 && code <= 0xd8ff)) {
+          // not overlong and not a surrogate pair 
+          if (result) {
+            *result += c;
+            *result += *(++s);
+            *result += *(++s);
+          }
+          continue;
+        }
+      }
+      // four byte encoding
+      if ((c & 0xf8) == 0xf0 && (s[1] & 0xc0) == 0x80 && (s[2] & 0xc0) == 0x80 && (s[3] & 0xc0) == 0x80) {
+        const unsigned code = ((c & 0x07) << 18) | ((s[1] & 0x3f) << 12) | ((s[2] & 0x3f) << 6) | (s[3] & 0x3f);
+        if (code >= 0x10000 && code <= 0x10ffff) {
+          // not overlong and in defined unicode space
+          if (result) {
+            *result += c;
+            *result += *(++s);
+            *result += *(++s);
+            *result += *(++s);
+          }
+          continue;
+        }
+      }
+    }
+    // printf("invalid %02x at %d\n", c, i);
+    // Invalid utf8 code.  Convert it to a private two byte area of unicode
+    // e.g. the e000 - f8ff area.  This will be a three byte encoding
+    invalid = true;
+    if (result) {
+      unsigned escape = escape_base + c;
+      *result += 0xe0 | ((escape >> 12) & 0x0f);
+      *result += 0x80 | ((escape >> 06) & 0x3f);
+      *result += 0x80 | ((escape >> 00) & 0x3f);
+    }
+  }
+  return invalid;
+}
+
+string s3fs_wtf8_encode(const string &s)
+{
+  string result;
+  s3fs_wtf8_encode(s.c_str(), &result);
+  return result;
+}
+
+// The reverse operation, turn encoded bytes back into their original values
+// The code assumes that we map to a three-byte code point.
+bool s3fs_wtf8_decode(const char *s, string *result)
+{
+  bool encoded = false;
+  for (; *s; s++) {
+    unsigned char c = *s;
+    // look for a three byte tuple matching our encoding code
+    if ((c & 0xf0) == 0xe0 && (s[1] & 0xc0) == 0x80 && (s[2] & 0xc0) == 0x80) {
+      unsigned code = (c & 0x0f) << 12;
+      code |= (s[1] & 0x3f) << 6;
+      code |= (s[2] & 0x3f) << 0;
+      if (code >= escape_base && code <= escape_base + 0xff) {
+        // convert back
+        encoded = true;
+        if (result)
+          *result += code - escape_base;
+        s+=2;
+        continue;
+      }
+    }
+    if (result)
+      *result += c;
+  }
+  return encoded;
+}
+ 
+string s3fs_wtf8_decode(const string &s)
+{
+  string result;
+  s3fs_wtf8_decode(s.c_str(), &result);
   return result;
 }
 

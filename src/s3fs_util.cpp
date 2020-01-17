@@ -48,7 +48,7 @@ using namespace std;
 //-------------------------------------------------------------------
 // Global variables
 //-------------------------------------------------------------------
-std::string mount_prefix   = "";
+std::string mount_prefix;
 
 //-------------------------------------------------------------------
 // Utility
@@ -150,10 +150,10 @@ bool S3ObjList::insert_normalized(const char* name, const char* normalized, bool
   s3obj_t::iterator iter;
   if(objects.end() != (iter = objects.find(name))){
     // found name --> over write
-    (*iter).second.orgname.erase();
-    (*iter).second.etag.erase();
-    (*iter).second.normalname = normalized;
-    (*iter).second.is_dir     = is_dir;
+    iter->second.orgname.erase();
+    iter->second.etag.erase();
+    iter->second.normalname = normalized;
+    iter->second.is_dir     = is_dir;
   }else{
     // not found --> add new object
     s3obj_entry newobject;
@@ -259,7 +259,7 @@ bool S3ObjList::GetNameList(s3obj_list_t& list, bool OnlyNormalized, bool CutSla
     }
     string name = (*iter).first;
     if(CutSlash && 1 < name.length() && '/' == name[name.length() - 1]){
-      // only "/" string is skio this.
+      // only "/" string is skipped this.
       name = name.substr(0, name.length() - 1);
     }
     list.push_back(name);
@@ -283,7 +283,7 @@ bool S3ObjList::MakeHierarchizedList(s3obj_list_t& list, bool haveSlash)
     h_map[strtmp] = true;
 
     // check hierarchized directory
-    for(string::size_type pos = strtmp.find_last_of("/"); string::npos != pos; pos = strtmp.find_last_of("/")){
+    for(string::size_type pos = strtmp.find_last_of('/'); string::npos != pos; pos = strtmp.find_last_of('/')){
       strtmp = strtmp.substr(0, pos);
       if(0 == strtmp.length() || "/" == strtmp){
         break;
@@ -419,7 +419,6 @@ void free_mvnodes(MVNODE *head)
     free(my_head->new_path);
     free(my_head);
   }
-  return;
 }
 
 //-------------------------------------------------------------------
@@ -586,7 +585,7 @@ string mydirname(const char* path)
   return mydirname(string(path));
 }
 
-string mydirname(string path)
+string mydirname(const string& path)
 {
   return string(dirname((char*)path.c_str()));
 }
@@ -601,7 +600,7 @@ string mybasename(const char* path)
   return mybasename(string(path));
 }
 
-string mybasename(string path)
+string mybasename(const string& path)
 {
   return string(basename((char*)path.c_str()));
 }
@@ -609,9 +608,9 @@ string mybasename(string path)
 // mkdir --parents
 int mkdirp(const string& path, mode_t mode)
 {
-  string       base;
-  string       component;
-  stringstream ss(path);
+  string        base;
+  string        component;
+  istringstream ss(path);
   while (getline(ss, component, '/')) {
     base += "/" + component;
 
@@ -632,10 +631,10 @@ int mkdirp(const string& path, mode_t mode)
 // get existed directory path
 string get_exist_directory_path(const string& path)
 {
-  string       existed("/");    // "/" is existed.
-  string       base;
-  string       component;
-  stringstream ss(path);
+  string        existed("/");    // "/" is existed.
+  string        base;
+  string        component;
+  istringstream ss(path);
   while (getline(ss, component, '/')) {
     if(base != "/"){
       base += "/";
@@ -661,7 +660,7 @@ bool check_exist_dir_permission(const char* dirpath)
   struct stat st;
   if(0 != stat(dirpath, &st)){
     if(ENOENT == errno){
-      // dir does not exitst
+      // dir does not exist
       return true;
     }
     if(EACCES == errno){
@@ -748,21 +747,45 @@ bool delete_files_in_dir(const char* dir, bool is_remove_own)
 //-------------------------------------------------------------------
 // Utility functions for convert
 //-------------------------------------------------------------------
-time_t get_mtime(const char *s)
+time_t get_mtime(const char *str)
 {
-  return static_cast<time_t>(s3fs_strtoofft(s));
+  // [NOTE]
+  // In rclone, there are cases where ns is set to x-amz-meta-mtime
+  // with floating point number. s3fs uses x-amz-meta-mtime by
+  // truncating the floating point or less (in seconds or less) to
+  // correspond to this.
+  //
+  string strmtime;
+  if(str && '\0' != *str){
+    strmtime = str;
+    string::size_type pos = strmtime.find('.', 0);
+    if(string::npos != pos){
+      strmtime = strmtime.substr(0, pos);
+    }
+  }
+  return static_cast<time_t>(s3fs_strtoofft(strmtime.c_str()));
 }
 
-time_t get_mtime(headers_t& meta, bool overcheck)
+static time_t get_time(headers_t& meta, bool overcheck, const char *header)
 {
   headers_t::const_iterator iter;
-  if(meta.end() == (iter = meta.find("x-amz-meta-mtime"))){
+  if(meta.end() == (iter = meta.find(header))){
     if(overcheck){
       return get_lastmodified(meta);
     }
     return 0;
   }
   return get_mtime((*iter).second.c_str());
+}
+
+time_t get_mtime(headers_t& meta, bool overcheck)
+{
+  return get_time(meta, overcheck, "x-amz-meta-mtime");
+}
+
+time_t get_ctime(headers_t& meta, bool overcheck)
+{
+  return get_time(meta, overcheck, "x-amz-meta-ctime");
 }
 
 off_t get_size(const char *s)
@@ -792,11 +815,13 @@ mode_t get_mode(headers_t& meta, const char* path, bool checkdir, bool forcedir)
 
   if(meta.end() != (iter = meta.find("x-amz-meta-mode"))){
     mode = get_mode((*iter).second.c_str());
+  }else if(meta.end() != (iter = meta.find("x-amz-meta-permissions"))){ // for s3sync
+    mode = get_mode((*iter).second.c_str());
+    isS3sync = true;
   }else{
-    if(meta.end() != (iter = meta.find("x-amz-meta-permissions"))){ // for s3sync
-      mode = get_mode((*iter).second.c_str());
-      isS3sync = true;
-    }
+    // If another tool creates an object without permissions, default to owner
+    // read-write and group readable.
+    mode = path[strlen(path) - 1] == '/' ? 0750 : 0640;
   }
   // Checking the bitmask, if the last 3 bits are all zero then process as a regular
   // file type (S_IFDIR or S_IFREG), otherwise return mode unmodified so that S_IFIFO,
@@ -810,18 +835,19 @@ mode_t get_mode(headers_t& meta, const char* path, bool checkdir, bool forcedir)
           if(meta.end() != (iter = meta.find("Content-Type"))){
             string strConType = (*iter).second;
             // Leave just the mime type, remove any optional parameters (eg charset)
-            string::size_type pos = strConType.find(";");
+            string::size_type pos = strConType.find(';');
             if(string::npos != pos){
               strConType = strConType.substr(0, pos);
             }
-            if(strConType == "application/x-directory"){
+            if(strConType == "application/x-directory" 
+	       || strConType == "httpd/unix-directory"){ // Nextcloud uses this MIME type for directory objects when mounting bucket as external Storage
               mode |= S_IFDIR;
             }else if(path && 0 < strlen(path) && '/' == path[strlen(path) - 1]){
               if(strConType == "binary/octet-stream" || strConType == "application/octet-stream"){
                 mode |= S_IFDIR;
               }else{
                 if(complement_stat){
-                  // If complement lack stat mode, when the object has '/' charactor at end of name
+                  // If complement lack stat mode, when the object has '/' character at end of name
                   // and content type is text/plain and the object's size is 0 or 1, it should be
                   // directory.
                   off_t size = get_size(meta);
@@ -866,12 +892,13 @@ uid_t get_uid(const char *s)
 uid_t get_uid(headers_t& meta)
 {
   headers_t::const_iterator iter;
-  if(meta.end() == (iter = meta.find("x-amz-meta-uid"))){
-    if(meta.end() == (iter = meta.find("x-amz-meta-owner"))){ // for s3sync
-      return 0;
-    }
+  if(meta.end() != (iter = meta.find("x-amz-meta-uid"))){
+    return get_uid((*iter).second.c_str());
+  }else if(meta.end() != (iter = meta.find("x-amz-meta-owner"))){ // for s3sync
+    return get_uid((*iter).second.c_str());
+  }else{
+    return geteuid();
   }
-  return get_uid((*iter).second.c_str());
 }
 
 gid_t get_gid(const char *s)
@@ -882,12 +909,13 @@ gid_t get_gid(const char *s)
 gid_t get_gid(headers_t& meta)
 {
   headers_t::const_iterator iter;
-  if(meta.end() == (iter = meta.find("x-amz-meta-gid"))){
-    if(meta.end() == (iter = meta.find("x-amz-meta-group"))){ // for s3sync
-      return 0;
-    }
+  if(meta.end() != (iter = meta.find("x-amz-meta-gid"))){
+    return get_gid((*iter).second.c_str());
+  }else if(meta.end() != (iter = meta.find("x-amz-meta-group"))){ // for s3sync
+    return get_gid((*iter).second.c_str());
+  }else{
+    return getegid();
   }
-  return get_gid((*iter).second.c_str());
 }
 
 blkcnt_t get_blocks(off_t size)
@@ -964,13 +992,13 @@ bool is_need_check_obj_detail(headers_t& meta)
 //-------------------------------------------------------------------
 // Help
 //-------------------------------------------------------------------
-void show_usage (void)
+void show_usage ()
 {
   printf("Usage: %s BUCKET:[PATH] MOUNTPOINT [OPTION]...\n",
     program_name.c_str());
 }
 
-void show_help (void)
+void show_help ()
 {
   show_usage();
   printf(
@@ -985,12 +1013,13 @@ void show_help (void)
     "   umounting\n"
     "     umount mountpoint\n"
     "\n"
-    "   utility mode (remove interrupted multipart uploading objects)\n"
-    "     s3fs -u bucket\n"
-    "\n"
     "   General forms for s3fs and FUSE/mount options:\n"
     "      -o opt[,opt...]\n"
     "      -o opt [-o opt] ...\n"
+    "\n"
+    "   utility mode (remove interrupted multipart uploading objects)\n"
+    "     s3fs --incomplete-mpu-list(-u) bucket\n"
+    "     s3fs --incomplete-mpu-abort[=all | =<date format>] bucket\n"
     "\n"
     "s3fs Options:\n"
     "\n"
@@ -1005,8 +1034,9 @@ void show_help (void)
     "   default_acl (default=\"private\")\n"
     "      - the default canned acl to apply to all written s3 objects,\n"
     "        e.g., private, public-read.  empty string means do not send\n"
-    "        header.  see http://aws.amazon.com/documentation/s3/ for the\n"
-    "        full list of canned acls\n"
+    "        header.  see\n"
+    "        https://docs.aws.amazon.com/AmazonS3/latest/dev/acl-overview.html#canned-acl\n"
+    "        for the full list of canned acls\n"
     "\n"
     "   retries (default=\"5\")\n"
     "      - number of times to retry a failed s3 transaction\n"
@@ -1024,7 +1054,7 @@ void show_help (void)
     "\n"
     "   storage_class (default=\"standard\")\n"
     "      - store object with specified storage class.  Possible values:\n"
-    "        standard, standard_ia, and reduced_redundancy.\n"
+    "        standard, standard_ia, onezone_ia and reduced_redundancy.\n"
     "\n"
     "   use_sse (default is disable)\n"
     "      - Specify three type Amazon's Server-Site Encryption: SSE-S3,\n"
@@ -1104,6 +1134,11 @@ void show_help (void)
     "      If you specify this option for set \"Content-Encoding\" HTTP \n"
     "      header, please take care for RFC 2616.\n"
     "\n"
+    "   profile (default=\"default\")\n"
+    "      - Choose a profile from ${HOME}/.aws/credentials to authenticate\n"
+    "        against S3. Note that this format matches the AWS CLI format and\n"
+    "        differs from the s3fs passwd format.\n"
+    "\n"
     "   connect_timeout (default=\"300\" seconds)\n"
     "      - time to wait for connection before giving up\n"
     "\n"
@@ -1162,7 +1197,7 @@ void show_help (void)
     "        space is smaller than this value, s3fs do not use diskspace\n"
     "        as possible in exchange for the performance.\n"
     "\n"
-    "   singlepart_copy_limit (default=\"5120\")\n"
+    "   singlepart_copy_limit (default=\"512\")\n"
     "      - maximum size, in MB, of a single-part copy before trying \n"
     "      multipart copy.\n"
     "\n"
@@ -1183,7 +1218,7 @@ void show_help (void)
     "      error from the S3 server.\n"
     "\n"
     "   sigv2 (default is signature version 4)\n"
-    "      - sets signing AWS requests by sing Signature Version 2\n"
+    "      - sets signing AWS requests by using Signature Version 2\n"
     "\n"
     "   mp_umask (default is \"0000\")\n"
     "      - sets umask for the mount point directory.\n"
@@ -1196,7 +1231,8 @@ void show_help (void)
     "   nomultipart (disable multipart uploads)\n"
     "\n"
     "   enable_content_md5 (default is disable)\n"
-    "      - ensure data integrity during writes with MD5 hash.\n"
+    "      Allow S3 server to check data integrity of uploads via the\n"
+    "      Content-MD5 header.  This can add CPU overhead to transfers.\n"
     "\n"
     "   ecs\n"
     "      - This option instructs s3fs to query the ECS container credential\n"
@@ -1302,6 +1338,14 @@ void show_help (void)
     "        Please use this option when the directory in the bucket is\n"
     "        only \"dir/\" object.\n"
     "\n"
+    "   use_wtf8 - support arbitrary file system encoding.\n"
+    "        S3 requires all object names to be valid utf-8. But some\n"
+    "        clients, notably Windows NFS clients, use their own encoding.\n"
+    "        This option re-encodes invalid utf-8 object names into valid\n"
+    "        utf-8 by mapping offending codes into a 'private' codepage of the\n"
+    "        Unicode set.\n"
+    "        Useful on clients not using utf-8 as their file system encoding.\n"
+    "\n"
     "FUSE/mount Options:\n"
     "\n"
     "   Most of the generic mount options described in 'man mount' are\n"
@@ -1312,6 +1356,22 @@ void show_help (void)
     "   \n"
     "   There are many FUSE specific mount options that can be specified.\n"
     "   e.g. allow_other  See the FUSE's README for the full set.\n"
+    "\n"
+    "Utility mode Options:\n"
+    "\n"
+    " -u, --incomplete-mpu-list\n"
+    "        Lists multipart incomplete objects uploaded to the specified\n"
+    "        bucket.\n"
+    " --incomplete-mpu-abort(=all or =<date format>)\n"
+    "        Delete the multipart incomplete object uploaded to the specified\n"
+    "        bucket.\n"
+    "        If \"all\" is specified for this option, all multipart incomplete\n"
+    "        objects will be deleted. If you specify no argument as an option,\n"
+    "        objects older than 24 hours(24H) will be deleted(This is the\n"
+    "        default value). You can specify an optional date format. It can\n"
+    "        be specified as year, month, day, hour, minute, second, and it is\n"
+    "        expressed as \"Y\", \"M\", \"D\", \"h\", \"m\", \"s\" respectively.\n"
+    "        For example, \"1Y6M10D12h30m30s\".\n"
     "\n"
     "Miscellaneous Options:\n"
     "\n"
@@ -1326,19 +1386,17 @@ void show_help (void)
     "\n"
     "s3fs home page: <https://github.com/s3fs-fuse/s3fs-fuse>\n"
   );
-  return;
 }
 
-void show_version(void)
+void show_version()
 {
   printf(
   "Amazon Simple Storage Service File System V%s(commit:%s) with %s\n"
   "Copyright (C) 2010 Randy Rizun <rrizun@gmail.com>\n"
-  "License GPL2: GNU GPL version 2 <http://gnu.org/licenses/gpl.html>\n"
+  "License GPL2: GNU GPL version 2 <https://gnu.org/licenses/gpl.html>\n"
   "This is free software: you are free to change and redistribute it.\n"
   "There is NO WARRANTY, to the extent permitted by law.\n",
   VERSION, COMMIT_HASH_VAL, s3fs_crypt_lib_name());
-  return;
 }
 
 /*

@@ -28,7 +28,6 @@
 #include <stdint.h>
 #include <pthread.h>
 #include <string.h>
-#include <assert.h>
 #include <syslog.h>
 #include <string>
 #include <map>
@@ -146,9 +145,12 @@ StatCache::StatCache() : IsExpireTime(false), IsExpireIntervalType(false), Expir
 {
   if(this == StatCache::getStatCacheData()){
     stat_cache.clear();
-    pthread_mutex_init(&(StatCache::stat_cache_lock), NULL);
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, S3FS_MUTEX_RECURSIVE);
+    pthread_mutex_init(&StatCache::stat_cache_lock, &attr);
   }else{
-    assert(false);
+    abort();
   }
 }
 
@@ -156,16 +158,16 @@ StatCache::~StatCache()
 {
   if(this == StatCache::getStatCacheData()){
     Clear();
-    pthread_mutex_destroy(&(StatCache::stat_cache_lock));
+    pthread_mutex_destroy(&StatCache::stat_cache_lock);
   }else{
-    assert(false);
+    abort();
   }
 }
 
 //-------------------------------------------------------------------
 // Methods
 //-------------------------------------------------------------------
-unsigned long StatCache::GetCacheSize(void) const
+unsigned long StatCache::GetCacheSize() const
 {
   return CacheSize;
 }
@@ -177,7 +179,7 @@ unsigned long StatCache::SetCacheSize(unsigned long size)
   return old;
 }
 
-time_t StatCache::GetExpireTime(void) const
+time_t StatCache::GetExpireTime() const
 {
   return (IsExpireTime ? ExpireTime : (-1));
 }
@@ -191,7 +193,7 @@ time_t StatCache::SetExpireTime(time_t expire, bool is_interval)
   return old;
 }
 
-time_t StatCache::UnsetExpireTime(void)
+time_t StatCache::UnsetExpireTime()
 {
   time_t old           = IsExpireTime ? ExpireTime : (-1);
   ExpireTime           = 0;
@@ -207,18 +209,15 @@ bool StatCache::SetCacheNoObject(bool flag)
   return old;
 }
 
-void StatCache::Clear(void)
+void StatCache::Clear()
 {
-  pthread_mutex_lock(&StatCache::stat_cache_lock);
+  AutoLock lock(&StatCache::stat_cache_lock);
 
-  for(stat_cache_t::iterator iter = stat_cache.begin(); iter != stat_cache.end(); stat_cache.erase(iter++)){
-    if((*iter).second){
-      delete (*iter).second;
-    }
+  for(stat_cache_t::iterator iter = stat_cache.begin(); iter != stat_cache.end(); ++iter){
+    delete (*iter).second;
   }
+  stat_cache.clear();
   S3FS_MALLOCTRIM(0);
-
-  pthread_mutex_unlock(&StatCache::stat_cache_lock);
 }
 
 bool StatCache::GetStat(string& key, struct stat* pst, headers_t* meta, bool overcheck, const char* petag, bool* pisforce)
@@ -226,23 +225,22 @@ bool StatCache::GetStat(string& key, struct stat* pst, headers_t* meta, bool ove
   bool is_delete_cache = false;
   string strpath = key;
 
-  pthread_mutex_lock(&StatCache::stat_cache_lock);
+  AutoLock lock(&StatCache::stat_cache_lock);
 
   stat_cache_t::iterator iter = stat_cache.end();
   if(overcheck && '/' != strpath[strpath.length() - 1]){
     strpath += "/";
-    iter = stat_cache.find(strpath.c_str());
+    iter = stat_cache.find(strpath);
   }
   if(iter == stat_cache.end()){
     strpath = key;
-    iter = stat_cache.find(strpath.c_str());
+    iter = stat_cache.find(strpath);
   }
 
   if(iter != stat_cache.end() && (*iter).second){
     stat_cache_entry* ent = (*iter).second;
     if(!IsExpireTime || !IsExpireStatCacheTime(ent->cache_date, ExpireTime)){
       if(ent->noobjcache){
-        pthread_mutex_unlock(&StatCache::stat_cache_lock);
         if(!IsCacheNoObject){
           // need to delete this cache.
           DelStat(strpath);
@@ -255,10 +253,10 @@ bool StatCache::GetStat(string& key, struct stat* pst, headers_t* meta, bool ove
       string stretag;
       if(petag){
         // find & check ETag
-        for(headers_t::iterator iter = ent->meta.begin(); iter != ent->meta.end(); ++iter){
-          string tag = lower(iter->first);
+        for(headers_t::iterator hiter = ent->meta.begin(); hiter != ent->meta.end(); ++hiter){
+          string tag = lower(hiter->first);
           if(tag == "etag"){
-            stretag = iter->second;
+            stretag = hiter->second;
             if('\0' != petag[0] && 0 != strcmp(petag, stretag.c_str())){
               is_delete_cache = true;
             }
@@ -289,7 +287,6 @@ bool StatCache::GetStat(string& key, struct stat* pst, headers_t* meta, bool ove
         if(IsExpireIntervalType){
           SetStatCacheTime(ent->cache_date);
         }
-        pthread_mutex_unlock(&StatCache::stat_cache_lock);
         return true;
       }
 
@@ -298,7 +295,6 @@ bool StatCache::GetStat(string& key, struct stat* pst, headers_t* meta, bool ove
       is_delete_cache = true;
     }
   }
-  pthread_mutex_unlock(&StatCache::stat_cache_lock);
 
   if(is_delete_cache){
     DelStat(strpath);
@@ -315,16 +311,16 @@ bool StatCache::IsNoObjectCache(string& key, bool overcheck)
     return false;
   }
 
-  pthread_mutex_lock(&StatCache::stat_cache_lock);
+  AutoLock lock(&StatCache::stat_cache_lock);
 
   stat_cache_t::iterator iter = stat_cache.end();
   if(overcheck && '/' != strpath[strpath.length() - 1]){
     strpath += "/";
-    iter = stat_cache.find(strpath.c_str());
+    iter = stat_cache.find(strpath);
   }
   if(iter == stat_cache.end()){
     strpath = key;
-    iter = stat_cache.find(strpath.c_str());
+    iter = stat_cache.find(strpath);
   }
 
   if(iter != stat_cache.end() && (*iter).second) {
@@ -332,7 +328,6 @@ bool StatCache::IsNoObjectCache(string& key, bool overcheck)
       if((*iter).second->noobjcache){
         // noobjcache = true means no object.
         SetStatCacheTime((*iter).second->cache_date);
-        pthread_mutex_unlock(&StatCache::stat_cache_lock);
         return true;
       }
     }else{
@@ -340,7 +335,6 @@ bool StatCache::IsNoObjectCache(string& key, bool overcheck)
       is_delete_cache = true;
     }
   }
-  pthread_mutex_unlock(&StatCache::stat_cache_lock);
 
   if(is_delete_cache){
     DelStat(strpath);
@@ -355,12 +349,13 @@ bool StatCache::AddStat(std::string& key, headers_t& meta, bool forcedir, bool n
   }
   S3FS_PRN_INFO3("add stat cache entry[path=%s]", key.c_str());
 
-  pthread_mutex_lock(&StatCache::stat_cache_lock);
-
-  bool found = stat_cache.end() != stat_cache.find(key);
-  bool do_truncate = stat_cache.size() > CacheSize;
-
-  pthread_mutex_unlock(&StatCache::stat_cache_lock);
+  bool found;
+  bool do_truncate;
+  {
+    AutoLock lock(&StatCache::stat_cache_lock);
+    found = stat_cache.end() != stat_cache.find(key);
+    do_truncate = stat_cache.size() > CacheSize;
+  }
 
   if(found){
     DelStat(key.c_str());
@@ -402,18 +397,14 @@ bool StatCache::AddStat(std::string& key, headers_t& meta, bool forcedir, bool n
   }
 
   // add
-  pthread_mutex_lock(&StatCache::stat_cache_lock);
+  AutoLock lock(&StatCache::stat_cache_lock);
 
   stat_cache_t::iterator iter = stat_cache.find(key);   // recheck for same key exists
   if(stat_cache.end() != iter){
-    if(iter->second){
-      delete iter->second;
-    }
+    delete iter->second;
     stat_cache.erase(iter);
   }
   stat_cache[key] = ent;
-
-  pthread_mutex_unlock(&StatCache::stat_cache_lock);
 
   return true;
 }
@@ -428,12 +419,13 @@ bool StatCache::AddNoObjectCache(string& key)
   }
   S3FS_PRN_INFO3("add no object cache entry[path=%s]", key.c_str());
 
-  pthread_mutex_lock(&StatCache::stat_cache_lock);
-
-  bool found = stat_cache.end() != stat_cache.find(key);
-  bool do_truncate = stat_cache.size() > CacheSize;
-
-  pthread_mutex_unlock(&StatCache::stat_cache_lock);
+  bool found;
+  bool do_truncate;
+  {
+    AutoLock lock(&StatCache::stat_cache_lock);
+    found = stat_cache.end() != stat_cache.find(key);
+    do_truncate = stat_cache.size() > CacheSize;
+  }
 
   if(found){
     DelStat(key.c_str());
@@ -456,26 +448,21 @@ bool StatCache::AddNoObjectCache(string& key)
   SetStatCacheTime(ent->cache_date);    // Set time.
 
   // add
-  pthread_mutex_lock(&StatCache::stat_cache_lock);
+  AutoLock lock(&StatCache::stat_cache_lock);
 
   stat_cache_t::iterator iter = stat_cache.find(key);   // recheck for same key exists
   if(stat_cache.end() != iter){
-    if(iter->second){
-      delete iter->second;
-    }
+    delete iter->second;
     stat_cache.erase(iter);
   }
   stat_cache[key] = ent;
 
-  pthread_mutex_unlock(&StatCache::stat_cache_lock);
-
   return true;
 }
 
-void StatCache::ChangeNoTruncateFlag(std::string key, bool no_truncate)
+void StatCache::ChangeNoTruncateFlag(const std::string& key, bool no_truncate)
 {
-  pthread_mutex_lock(&StatCache::stat_cache_lock);
-
+  AutoLock lock(&StatCache::stat_cache_lock);
   stat_cache_t::iterator iter = stat_cache.find(key);
 
   if(stat_cache.end() != iter){
@@ -490,25 +477,22 @@ void StatCache::ChangeNoTruncateFlag(std::string key, bool no_truncate)
       }
     }
   }
-  pthread_mutex_unlock(&StatCache::stat_cache_lock);
 }
 
-bool StatCache::TruncateCache(void)
+bool StatCache::TruncateCache()
 {
+  AutoLock lock(&StatCache::stat_cache_lock);
+
   if(stat_cache.empty()){
     return true;
   }
-
-  pthread_mutex_lock(&StatCache::stat_cache_lock);
 
   // 1) erase over expire time
   if(IsExpireTime){
     for(stat_cache_t::iterator iter = stat_cache.begin(); iter != stat_cache.end(); ){
       stat_cache_entry* entry = iter->second;
       if(!entry || (0L == entry->notruncate && IsExpireStatCacheTime(entry->cache_date, ExpireTime))){
-        if(entry){
-            delete entry;
-        }
+        delete entry;
         stat_cache.erase(iter++);
       }else{
         ++iter;
@@ -518,7 +502,6 @@ bool StatCache::TruncateCache(void)
 
   // 2) check stat cache count
   if(stat_cache.size() < CacheSize){
-    pthread_mutex_unlock(&StatCache::stat_cache_lock);
     return true;
   }
 
@@ -545,14 +528,10 @@ bool StatCache::TruncateCache(void)
     stat_cache_t::iterator siter = *iiter;
 
     S3FS_PRN_DBG("truncate stat cache[path=%s]", siter->first.c_str());
-    if(siter->second){
-        delete siter->second;
-    }
+    delete siter->second;
     stat_cache.erase(siter);
   }
   S3FS_MALLOCTRIM(0);
-
-  pthread_mutex_unlock(&StatCache::stat_cache_lock);
 
   return true;
 }
@@ -564,13 +543,11 @@ bool StatCache::DelStat(const char* key)
   }
   S3FS_PRN_INFO3("delete stat cache entry[path=%s]", key);
 
-  pthread_mutex_lock(&StatCache::stat_cache_lock);
+  AutoLock lock(&StatCache::stat_cache_lock);
 
   stat_cache_t::iterator iter;
   if(stat_cache.end() != (iter = stat_cache.find(string(key)))){
-    if((*iter).second){
-      delete (*iter).second;
-    }
+    delete (*iter).second;
     stat_cache.erase(iter);
   }
   if(0 < strlen(key) && 0 != strcmp(key, "/")){
@@ -582,16 +559,12 @@ bool StatCache::DelStat(const char* key)
       // If there is "path/" cache, delete it.
       strpath += "/";
     }
-    if(stat_cache.end() != (iter = stat_cache.find(strpath.c_str()))){
-      if((*iter).second){
-        delete (*iter).second;
-      }
+    if(stat_cache.end() != (iter = stat_cache.find(strpath))){
+      delete (*iter).second;
       stat_cache.erase(iter);
     }
   }
   S3FS_MALLOCTRIM(0);
-
-  pthread_mutex_unlock(&StatCache::stat_cache_lock);
 
   return true;
 }
@@ -619,6 +592,9 @@ bool convert_header_to_stat(const char* path, headers_t& meta, struct stat* pst,
 
   // mtime
   pst->st_mtime = get_mtime(meta);
+
+  // ctime
+  pst->st_ctime = get_ctime(meta);
 
   // size
   pst->st_size = get_size(meta);

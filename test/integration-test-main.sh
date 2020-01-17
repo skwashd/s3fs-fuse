@@ -108,7 +108,7 @@ function test_mv_file {
     rm_test_file $ALT_TEST_TEXT_FILE
 }
 
-function test_mv_directory {
+function test_mv_empty_directory {
     describe "Testing mv directory function ..."
     if [ -e $TEST_DIR ]; then
        echo "Unexpected, this file/directory exists: ${TEST_DIR}"
@@ -118,13 +118,36 @@ function test_mv_directory {
     mk_test_dir
 
     mv ${TEST_DIR} ${TEST_DIR}_rename
-
     if [ ! -d "${TEST_DIR}_rename" ]; then
        echo "Directory ${TEST_DIR} was not renamed"
        return 1
     fi
 
     rmdir ${TEST_DIR}_rename
+    if [ -e "${TEST_DIR}_rename" ]; then
+       echo "Could not remove the test directory, it still exists: ${TEST_DIR}_rename"
+       return 1
+    fi
+}
+
+function test_mv_nonempty_directory {
+    describe "Testing mv directory function ..."
+    if [ -e $TEST_DIR ]; then
+       echo "Unexpected, this file/directory exists: ${TEST_DIR}"
+       return 1
+    fi
+
+    mk_test_dir
+
+    touch ${TEST_DIR}/file
+
+    mv ${TEST_DIR} ${TEST_DIR}_rename
+    if [ ! -d "${TEST_DIR}_rename" ]; then
+       echo "Directory ${TEST_DIR} was not renamed"
+       return 1
+    fi
+
+    rm -r ${TEST_DIR}_rename
     if [ -e "${TEST_DIR}_rename" ]; then
        echo "Could not remove the test directory, it still exists: ${TEST_DIR}_rename"
        return 1
@@ -400,16 +423,66 @@ function test_mtime_file {
 
     #copy the test file with preserve mode
     cp -p $TEST_TEXT_FILE $ALT_TEST_TEXT_FILE
-    if [ `uname` = "Darwin" ]; then
-        testmtime=`stat -f "%m" $TEST_TEXT_FILE`
-        altmtime=`stat -f "%m" $ALT_TEST_TEXT_FILE`
-    else
-        testmtime=`stat -c %Y $TEST_TEXT_FILE`
-        altmtime=`stat -c %Y $ALT_TEST_TEXT_FILE`
-    fi
+    testmtime=`get_mtime $TEST_TEXT_FILE`
+    altmtime=`get_mtime $ALT_TEST_TEXT_FILE`
     if [ "$testmtime" -ne "$altmtime" ]
     then
        echo "File times do not match:  $testmtime != $altmtime"
+       return 1
+    fi
+}
+
+function test_update_time() {
+    describe "Testing update time function ..."
+
+    # create the test
+    mk_test_file
+    mtime=`get_ctime $TEST_TEXT_FILE`
+    ctime=`get_mtime $TEST_TEXT_FILE`
+
+    sleep 2
+    chmod +x $TEST_TEXT_FILE
+
+    ctime2=`get_ctime $TEST_TEXT_FILE`
+    mtime2=`get_mtime $TEST_TEXT_FILE`
+    if [ $ctime -eq $ctime2 -o $mtime -ne $mtime2 ]; then
+       echo "Expected updated ctime: $ctime != $ctime2 and same mtime: $mtime == $mtime2"
+       return 1
+    fi
+
+    sleep 2
+    chown $UID:$UID $TEST_TEXT_FILE;
+
+    ctime3=`get_ctime $TEST_TEXT_FILE`
+    mtime3=`get_mtime $TEST_TEXT_FILE`
+    if [ $ctime2 -eq $ctime3 -o $mtime2 -ne $mtime3 ]; then
+       echo "Expected updated ctime: $ctime2 != $ctime3 and same mtime: $mtime2 == $mtime3"
+       return 1
+    fi
+
+    if command -v setfattr >/dev/null 2>&1; then
+        sleep 2
+        setfattr -n key -v value $TEST_TEXT_FILE
+
+        ctime4=`get_ctime $TEST_TEXT_FILE`
+        mtime4=`get_mtime $TEST_TEXT_FILE`
+        if [ $ctime3 -eq $ctime4 -o $mtime3 -ne $mtime4 ]; then
+           echo "Expected updated ctime: $ctime3 != $ctime4 and same mtime: $mtime3 == $mtime4"
+           return 1
+        fi
+    else
+        echo "Skipping extended attribute test"
+        ctime4=`get_ctime $TEST_TEXT_FILE`
+        mtime4=`get_mtime $TEST_TEXT_FILE`
+    fi
+
+    sleep 2
+    echo foo >> $TEST_TEXT_FILE
+
+    ctime5=`get_ctime $TEST_TEXT_FILE`
+    mtime5=`get_mtime $TEST_TEXT_FILE`
+    if [ $ctime4 -eq $ctime5 -o $mtime4 -eq $mtime5 ]; then
+       echo "Expected updated ctime: $ctime4 != $ctime5 and updated mtime: $mtime4 != $mtime5"
        return 1
     fi
 }
@@ -437,29 +510,57 @@ function test_write_after_seek_ahead {
    rm testfile
 }
 
+function test_overwrite_existing_file_range {
+    describe "Test overwrite range succeeds"
+    dd if=<(seq 1000) of=${TEST_TEXT_FILE}
+    dd if=/dev/zero of=${TEST_TEXT_FILE} seek=1 count=1 bs=1024 conv=notrunc
+    cmp ${TEST_TEXT_FILE} <(
+        seq 1000 | head -c 1024
+        dd if=/dev/zero count=1 bs=1024
+        seq 1000 | tail -c +2049
+    )
+    rm -f ${TEST_TEXT_FILE}
+}
+
+function test_concurrency {
+    for i in `seq 10`; do echo foo > $i; done
+    for process in `seq 2`; do
+        for i in `seq 100`; do
+            file=$(ls | sed -n "$(($RANDOM % 10 + 1)){p;q}")
+            cat $file >/dev/null || true
+            rm -f $file
+            echo foo > $i || true
+        done &
+    done
+    wait
+}
+
 
 function add_all_tests {
     add_tests test_append_file 
     add_tests test_truncate_file 
     add_tests test_truncate_empty_file
     add_tests test_mv_file
-    add_tests test_mv_directory
+    add_tests test_mv_empty_directory
+    add_tests test_mv_nonempty_directory
     add_tests test_redirects
     add_tests test_mkdir_rmdir
     add_tests test_chmod
     add_tests test_chown
     add_tests test_list
     add_tests test_remove_nonempty_directory
-    # TODO: broken: https://github.com/s3fs-fuse/s3fs-fuse/issues/145
-    #add_tests test_rename_before_close
+    add_tests test_rename_before_close
     add_tests test_multipart_upload
     add_tests test_multipart_copy
     add_tests test_special_characters
     add_tests test_symlink
     add_tests test_extended_attributes
     add_tests test_mtime_file
+    add_tests test_update_time
     add_tests test_rm_rf_dir
     add_tests test_write_after_seek_ahead
+    add_tests test_overwrite_existing_file_range
+    add_tests test_concurrency
 }
 
 init_suite

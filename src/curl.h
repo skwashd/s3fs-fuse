@@ -23,6 +23,8 @@
 
 #include <cassert>
 
+#include "psemaphore.h"
+
 //----------------------------------------------
 // Symbols
 //----------------------------------------------
@@ -126,14 +128,12 @@ class S3fsMultiCurl;
 //----------------------------------------------
 // class CurlHandlerPool
 //----------------------------------------------
+typedef std::list<CURL*>            hcurllist_t;
 
 class CurlHandlerPool
 {
 public:
-  explicit CurlHandlerPool(int maxHandlers)
-    : mMaxHandlers(maxHandlers)
-    , mHandlers(NULL)
-    , mIndex(-1)
+  explicit CurlHandlerPool(int maxHandlers) : mMaxHandlers(maxHandlers)
   {
     assert(maxHandlers > 0);
   }
@@ -141,20 +141,23 @@ public:
   bool Init();
   bool Destroy();
 
-  CURL* GetHandler();
-  void ReturnHandler(CURL* h);
+  CURL* GetHandler(bool only_pool);
+  void ReturnHandler(CURL* hCurl, bool restore_pool);
 
 private:
-  int mMaxHandlers;
-
+  int             mMaxHandlers;
   pthread_mutex_t mLock;
-  CURL** mHandlers;
-  int mIndex;
+  hcurllist_t     mPool;
 };
 
 //----------------------------------------------
 // class S3fsCurl
 //----------------------------------------------
+class S3fsCurl;
+
+// Prototype function for lazy setup options for curl handle
+typedef bool (*s3fscurl_lazy_setup)(S3fsCurl* s3fscurl);
+
 typedef std::map<std::string, std::string> iamcredmap_t;
 typedef std::map<std::string, std::string> sseckeymap_t;
 typedef std::list<sseckeymap_t>            sseckeylist_t;
@@ -163,6 +166,7 @@ typedef std::list<sseckeymap_t>            sseckeylist_t;
 enum storage_class_t {
   STANDARD,
   STANDARD_IA,
+  ONEZONE_IA,
   REDUCED_REDUNDANCY
 };
 
@@ -246,6 +250,7 @@ class S3fsCurl
     static mimes_t          mimeTypes;
     static std::string      userAgent;
     static int              max_parallel_cnt;
+    static int              max_multireq;
     static off_t            multipart_size;
     static bool             is_sigv4;
     static bool             is_ua;             // User-Agent
@@ -277,6 +282,10 @@ class S3fsCurl
     sse_type_t           b_ssetype;            // backup for retrying
     std::string          op;                   // the HTTP verb of the request ("PUT", "GET", etc.)
     std::string          query_string;         // request query string
+    Semaphore            *sem;
+    pthread_mutex_t      *completed_tids_lock;
+    std::vector<pthread_t> *completed_tids;
+    s3fscurl_lazy_setup  fpLazySetup;          // curl options for lazy setting function
 
   public:
     // constructor/destructor
@@ -304,8 +313,16 @@ class S3fsCurl
     static size_t DownloadWriteCallback(void* ptr, size_t size, size_t nmemb, void* userp);
 
     static bool UploadMultipartPostCallback(S3fsCurl* s3fscurl);
+    static bool CopyMultipartPostCallback(S3fsCurl* s3fscurl);
     static S3fsCurl* UploadMultipartPostRetryCallback(S3fsCurl* s3fscurl);
+    static S3fsCurl* CopyMultipartPostRetryCallback(S3fsCurl* s3fscurl);
     static S3fsCurl* ParallelGetObjectRetryCallback(S3fsCurl* s3fscurl);
+
+    // lazy functions for set curl options
+    static bool UploadMultipartPostSetCurlOpts(S3fsCurl* s3fscurl);
+    static bool CopyMultipartPostSetCurlOpts(S3fsCurl* s3fscurl);
+    static bool PreGetObjectRequestSetCurlOpts(S3fsCurl* s3fscurl);
+    static bool PreHeadRequestSetCurlOpts(S3fsCurl* s3fscurl);
 
     static bool ParseIAMCredentialResponse(const char* response, iamcredmap_t& keyval);
     static bool SetIAMCredentials(const char* response);
@@ -332,8 +349,9 @@ class S3fsCurl
     int GetIAMCredentials(void);
 
     int UploadMultipartPostSetup(const char* tpath, int part_num, const std::string& upload_id);
-    int CopyMultipartPostRequest(const char* from, const char* to, int part_num, std::string& upload_id, headers_t& meta);
+    int CopyMultipartPostSetup(const char* from, const char* to, int part_num, std::string& upload_id, headers_t& meta);
     bool UploadMultipartPostComplete();
+    bool CopyMultipartPostComplete();
 
   public:
     // class methods
@@ -385,8 +403,12 @@ class S3fsCurl
                 }
     static long SetSslVerifyHostname(long value);
     static long GetSslVerifyHostname(void) { return S3fsCurl::ssl_verify_hostname; }
+    // maximum parallel GET and PUT requests
     static int SetMaxParallelCount(int value);
     static int GetMaxParallelCount(void) { return S3fsCurl::max_parallel_cnt; }
+    // maximum parallel HEAD requests
+    static int SetMaxMultiRequest(int max);
+    static int GetMaxMultiRequest(void) { return S3fsCurl::max_multireq; }
     static bool SetIsECS(bool flag);
     static bool SetIsIBMIAMAuth(bool flag);
     static size_t SetIAMFieldCount(size_t field_count);
@@ -404,12 +426,12 @@ class S3fsCurl
     static void InitUserAgent(void);
 
     // methods
-    bool CreateCurlHandle(bool force = false);
-    bool DestroyCurlHandle(bool force = false);
+    bool CreateCurlHandle(bool only_pool = false, bool remake = false);
+    bool DestroyCurlHandle(bool restore_pool = true, bool clear_internal_data = true);
 
     bool LoadIAMRoleFromMetaData(void);
     bool AddSseRequestHead(sse_type_t ssetype, std::string& ssevalue, bool is_only_c, bool is_copy);
-    bool GetResponseCode(long& responseCode);
+    bool GetResponseCode(long& responseCode, bool from_curl_handle = true);
     int RequestPerform(void);
     int DeleteRequest(const char* tpath);
     bool PreHeadRequest(const char* tpath, const char* bpath = NULL, const char* savedpath = NULL, int ssekey_pos = -1);
@@ -459,20 +481,23 @@ class S3fsCurl
 //----------------------------------------------
 // Class for lapping multi curl
 //
-typedef std::map<CURL*, S3fsCurl*> s3fscurlmap_t;
+typedef std::vector<S3fsCurl*>       s3fscurllist_t;
 typedef bool (*S3fsMultiSuccessCallback)(S3fsCurl* s3fscurl);    // callback for succeed multi request
 typedef S3fsCurl* (*S3fsMultiRetryCallback)(S3fsCurl* s3fscurl); // callback for failure and retrying
 
 class S3fsMultiCurl
 {
   private:
-    static int    max_multireq;
+    const int maxParallelism;
 
-    s3fscurlmap_t cMap_all;  // all of curl requests
-    s3fscurlmap_t cMap_req;  // curl requests are sent
+    s3fscurllist_t clist_all;  // all of curl requests
+    s3fscurllist_t clist_req;  // curl requests are sent
 
     S3fsMultiSuccessCallback SuccessCallback;
     S3fsMultiRetryCallback   RetryCallback;
+
+    pthread_mutex_t completed_tids_lock;
+    std::vector<pthread_t> completed_tids;
 
   private:
     bool ClearEx(bool is_all);
@@ -482,11 +507,10 @@ class S3fsMultiCurl
     static void* RequestPerformWrapper(void* arg);
 
   public:
-    S3fsMultiCurl();
+    explicit S3fsMultiCurl(int maxParallelism);
     ~S3fsMultiCurl();
 
-    static int SetMaxMultiRequest(int max);
-    static int GetMaxMultiRequest(void) { return S3fsMultiCurl::max_multireq; }
+    int GetMaxParallelism() { return maxParallelism; }
 
     S3fsMultiSuccessCallback SetSuccessCallback(S3fsMultiSuccessCallback function);
     S3fsMultiRetryCallback SetRetryCallback(S3fsMultiRetryCallback function);
