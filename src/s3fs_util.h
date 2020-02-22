@@ -86,14 +86,19 @@ typedef struct mvnode {
 
 class AutoLock
 {
-  private:
-    pthread_mutex_t* auto_mutex;
-    bool is_lock_acquired;
-
   public:
-    explicit AutoLock(pthread_mutex_t* pmutex, bool no_wait = false);
+    enum Type {
+      NO_WAIT = 1,
+      ALREADY_LOCKED = 2,
+      NONE = 0
+    };
+    explicit AutoLock(pthread_mutex_t* pmutex, Type type = NONE);
     bool isLockAcquired() const;
     ~AutoLock();
+
+  private:
+    pthread_mutex_t* const auto_mutex;
+    bool is_lock_acquired;
 };
 
 //-------------------------------------------------------------------
@@ -105,6 +110,7 @@ MVNODE *create_mvnode(const char *old_path, const char *new_path, bool is_dir, b
 MVNODE *add_mvnode(MVNODE** head, MVNODE** tail, const char *old_path, const char *new_path, bool is_dir, bool normdir = false);
 void free_mvnodes(MVNODE *head);
 
+void init_sysconf_vars();
 std::string get_username(uid_t uid);
 int is_uid_include_group(uid_t uid, gid_t gid);
 
@@ -133,6 +139,7 @@ time_t cvtIAMExpireStringToTime(const char* s);
 time_t get_lastmodified(const char* s);
 time_t get_lastmodified(headers_t& meta);
 bool is_need_check_obj_detail(headers_t& meta);
+bool simple_parse_xml(const char* data, size_t len, const char* key, std::string& value);
 
 void show_usage(void);
 void show_help(void);

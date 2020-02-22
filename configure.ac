@@ -20,7 +20,7 @@
 dnl Process this file with autoconf to produce a configure script.
 
 AC_PREREQ(2.59)
-AC_INIT(s3fs, 1.85)
+AC_INIT(s3fs, 1.86)
 AC_CONFIG_HEADER([config.h])
 
 AC_CANONICAL_SYSTEM
@@ -33,7 +33,7 @@ AC_CHECK_HEADERS([sys/xattr.h])
 AC_CHECK_HEADERS([attr/xattr.h])
 AC_CHECK_HEADERS([sys/extattr.h])
 
-CXXFLAGS="$CXXFLAGS -Wall -D_FILE_OFFSET_BITS=64"
+CXXFLAGS="$CXXFLAGS -Wall -D_FILE_OFFSET_BITS=64 -D_FORTIFY_SOURCE=2"
 
 dnl ----------------------------------------------
 dnl For macOS
@@ -265,6 +265,51 @@ AC_COMPILE_IFELSE(
 )
 
 dnl ----------------------------------------------
+dnl check CURLoption
+dnl ----------------------------------------------
+dnl CURLOPT_TCP_KEEPALIVE (is supported by 7.25.0 and later)
+AC_MSG_CHECKING([checking CURLOPT_TCP_KEEPALIVE])
+AC_COMPILE_IFELSE(
+  [AC_LANG_PROGRAM([[#include <curl/curl.h>]],
+                   [[CURLoption opt = CURLOPT_TCP_KEEPALIVE;]])
+  ],
+  [AC_DEFINE(HAVE_CURLOPT_TCP_KEEPALIVE, 1, [Define to 1 if libcurl has CURLOPT_TCP_KEEPALIVE CURLoption])
+   AC_MSG_RESULT(yes)
+  ],
+  [AC_DEFINE(HAVE_CURLOPT_TCP_KEEPALIVE, 0, [Define to 1 if libcurl has CURLOPT_TCP_KEEPALIVE CURLoption])
+   AC_MSG_RESULT(no)
+  ]
+)
+
+dnl CURLOPT_SSL_ENABLE_ALPN (is supported by 7.36.0 and later)
+AC_MSG_CHECKING([checking CURLOPT_SSL_ENABLE_ALPN])
+AC_COMPILE_IFELSE(
+  [AC_LANG_PROGRAM([[#include <curl/curl.h>]],
+                   [[CURLoption opt = CURLOPT_SSL_ENABLE_ALPN;]])
+  ],
+  [AC_DEFINE(HAVE_CURLOPT_SSL_ENABLE_ALPN, 1, [Define to 1 if libcurl has CURLOPT_SSL_ENABLE_ALPN CURLoption])
+   AC_MSG_RESULT(yes)
+  ],
+  [AC_DEFINE(HAVE_CURLOPT_SSL_ENABLE_ALPN, 0, [Define to 1 if libcurl has CURLOPT_SSL_ENABLE_ALPN CURLoption])
+   AC_MSG_RESULT(no)
+  ]
+)
+
+dnl CURLOPT_KEEP_SENDING_ON_ERROR (is supported by 7.51.0 and later)
+AC_MSG_CHECKING([checking CURLOPT_KEEP_SENDING_ON_ERROR])
+AC_COMPILE_IFELSE(
+  [AC_LANG_PROGRAM([[#include <curl/curl.h>]],
+                   [[CURLoption opt = CURLOPT_KEEP_SENDING_ON_ERROR;]])
+  ],
+  [AC_DEFINE(HAVE_CURLOPT_KEEP_SENDING_ON_ERROR, 1, [Define to 1 if libcurl has CURLOPT_KEEP_SENDING_ON_ERROR CURLoption])
+   AC_MSG_RESULT(yes)
+  ],
+  [AC_DEFINE(HAVE_CURLOPT_KEEP_SENDING_ON_ERROR, 0, [Define to 1 if libcurl has CURLOPT_KEEP_SENDING_ON_ERROR CURLoption])
+   AC_MSG_RESULT(no)
+  ]
+)
+
+dnl ----------------------------------------------
 dnl output files
 dnl ----------------------------------------------
 AC_CONFIG_FILES(Makefile src/Makefile test/Makefile doc/Makefile)
@@ -273,10 +318,10 @@ dnl ----------------------------------------------
 dnl short commit hash
 dnl ----------------------------------------------
 AC_CHECK_PROG([GITCMD], [git —version], [yes], [no])
-AC_CHECK_FILE([.git], [DOTGITDIR=yes], [DOTGITDIR=no])
+AS_IF([test -d .git], [DOTGITDIR=yes], [DOTGITDIR=no])
 
 AC_MSG_CHECKING([github short commit hash])
-if test “x${GITCMD}” = “xyes” -a “x${DOTGITDIR}” = “xyes”; then
+if test "x${GITCMD}" = "xyes" -a "x${DOTGITDIR}" = "xyes"; then
     GITCOMMITHASH=`git rev-parse --short HEAD`
 elif test -f default_commit_hash; then
     GITCOMMITHASH=`cat default_commit_hash`

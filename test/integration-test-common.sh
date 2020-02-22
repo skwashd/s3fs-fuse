@@ -10,11 +10,11 @@
 # S3FS_CREDENTIALS_FILE=keyfile      s3fs format key file
 # TEST_BUCKET_1=bucketname           Name of bucket to use 
 # S3PROXY_BINARY=""                  Specify empty string to skip S3Proxy start
-# S3_URL="http://s3.amazonaws.com"   Specify Amazon AWS as the S3 provider 
+# S3_URL="https://s3.amazonaws.com"   Specify Amazon AWS as the S3 provider
 #
 # Example of running against Amazon S3 using a bucket named "bucket:
 #
-# S3FS_CREDENTIALS_FILE=keyfile TEST_BUCKET_1=bucket S3PROXY_BINARY="" S3_URL="http://s3.amazonaws.com" ./small-integration-test.sh
+# S3FS_CREDENTIALS_FILE=keyfile TEST_BUCKET_1=bucket S3PROXY_BINARY="" S3_URL="https://s3.amazonaws.com" ./small-integration-test.sh
 #
 # To change the s3fs-fuse debug level:
 #
@@ -27,7 +27,7 @@
 #
 # Run all of the tests from the makefile
 #
-#    S3FS_CREDENTIALS_FILE=keyfile TEST_BUCKET_1=bucket S3PROXY_BINARY="" S3_URL="http://s3.amazonaws.com" make check
+#    S3FS_CREDENTIALS_FILE=keyfile TEST_BUCKET_1=bucket S3PROXY_BINARY="" S3_URL="https://s3.amazonaws.com" make check
 #
 # Run the tests with request auth turned off in both S3Proxy and s3fs-fuse.  This can be
 # useful for poking around with plain old curl
@@ -38,6 +38,8 @@
 # eg: VALGRIND="--tool=memcheck --leak-check=full" ./small-integration-test.sh
 
 set -o errexit
+set -o pipefail
+
 S3FS=../src/s3fs
 
 # Allow these defaulted values to be overridden
@@ -50,7 +52,7 @@ export S3_URL
 export TEST_SCRIPT_DIR=`pwd`
 export TEST_BUCKET_MOUNT_POINT_1=${TEST_BUCKET_1}
 
-S3PROXY_VERSION="1.6.1"
+S3PROXY_VERSION="1.7.0"
 S3PROXY_BINARY=${S3PROXY_BINARY-"s3proxy-${S3PROXY_VERSION}"}
 
 if [ ! -f "$S3FS_CREDENTIALS_FILE" ]
@@ -72,18 +74,18 @@ function retry {
     N=$1; shift;
     status=0
     for i in $(seq $N); do
-        echo "Trying: $@"
-        $@
+        echo "Trying: $*"
+        "$@"
         status=$?
         if [ $status == 0 ]; then
             break
         fi
         sleep 1
-        echo "Retrying: $@"
+        echo "Retrying: $*"
     done
 
     if [ $status != 0 ]; then
-        echo "timeout waiting for $@"
+        echo "timeout waiting for $*"
     fi
     set -o errexit
     return $status
@@ -135,7 +137,6 @@ function stop_s3proxy {
 # Mount the bucket, function arguments passed to s3fs in addition to
 # a set of common arguments.  
 function start_s3fs {
-
     # Public bucket if PUBLIC is set
     if [ -n "${PUBLIC}" ]; then
         AUTH_OPT="-o public_bucket=1"
@@ -149,6 +150,13 @@ function start_s3fs {
     # Start valgrind-listener (default port is 1500)
     if [ -n "${VALGRIND}" ]; then
         VALGRIND_EXEC="valgrind ${VALGRIND} --log-socket=127.0.1.1"
+    fi
+
+    # On OSX only, we need to specify the direct_io and auto_cache flag.
+    if [ `uname` = "Darwin" ]; then
+       DIRECT_IO_OPT="-o direct_io -o auto_cache"
+    else
+       DIRECT_IO_OPT=""
     fi
 
     # Common s3fs options:
@@ -184,10 +192,13 @@ function start_s3fs {
             -o use_xattr=1 \
             -o createbucket \
             ${AUTH_OPT} \
+            ${DIRECT_IO_OPT} \
+            -o stat_cache_expire=1 \
+            -o stat_cache_interval_expire=1 \
             -o dbglevel=${DBGLEVEL:=info} \
             -o retries=3 \
             -f \
-            ${@} | stdbuf -oL -eL sed -u "s/^/s3fs: /" &
+            "${@}" | stdbuf -oL -eL sed $SED_BUFFER_FLAG "s/^/s3fs: /" &
     )
 
     if [ `uname` = "Darwin" ]; then
@@ -206,7 +217,7 @@ function start_s3fs {
          fi
          set -o errexit
     else
-        retry 5 grep -q $TEST_BUCKET_MOUNT_POINT_1 /proc/mounts || exit 1
+        retry 20 grep -q $TEST_BUCKET_MOUNT_POINT_1 /proc/mounts || exit 1
     fi
 
     # Quick way to start system up for manual testing with options under test
@@ -221,8 +232,7 @@ function start_s3fs {
 function stop_s3fs {
     # Retry in case file system is in use
     if [ `uname` = "Darwin" ]; then
-        df | grep -q $TEST_BUCKET_MOUNT_POINT_1
-        if [ $? -eq 0 ]; then
+        if df | grep -q $TEST_BUCKET_MOUNT_POINT_1; then
             retry 10 df | grep -q $TEST_BUCKET_MOUNT_POINT_1 && umount $TEST_BUCKET_MOUNT_POINT_1
         fi
     else

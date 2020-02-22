@@ -79,12 +79,17 @@ void test_strtoofft()
 {
   ASSERT_EQUALS(s3fs_strtoofft("0"), static_cast<off_t>(0L));
   ASSERT_EQUALS(s3fs_strtoofft("9"), static_cast<off_t>(9L));
-  ASSERT_EQUALS(s3fs_strtoofft("A"), static_cast<off_t>(0L));
-  ASSERT_EQUALS(s3fs_strtoofft("A", /*is_base_16=*/ true), static_cast<off_t>(10L));
-  ASSERT_EQUALS(s3fs_strtoofft("F", /*is_base_16=*/ true), static_cast<off_t>(15L));
-  ASSERT_EQUALS(s3fs_strtoofft("a", /*is_base_16=*/ true), static_cast<off_t>(10L));
-  ASSERT_EQUALS(s3fs_strtoofft("f", /*is_base_16=*/ true), static_cast<off_t>(15L));
-  ASSERT_EQUALS(s3fs_strtoofft("deadbeef", /*is_base_16=*/ true), static_cast<off_t>(3735928559L));
+  try{
+    s3fs_strtoofft("A");
+    abort();
+  }catch(std::exception &e){
+    // expected
+  }
+  ASSERT_EQUALS(s3fs_strtoofft("A", /*base=*/ 16), static_cast<off_t>(10L));
+  ASSERT_EQUALS(s3fs_strtoofft("F", /*base=*/ 16), static_cast<off_t>(15L));
+  ASSERT_EQUALS(s3fs_strtoofft("a", /*base=*/ 16), static_cast<off_t>(10L));
+  ASSERT_EQUALS(s3fs_strtoofft("f", /*base=*/ 16), static_cast<off_t>(15L));
+  ASSERT_EQUALS(s3fs_strtoofft("deadbeef", /*base=*/ 16), static_cast<off_t>(3735928559L));
 }
 
 void test_wtf8_encoding()

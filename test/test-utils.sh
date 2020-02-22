@@ -1,6 +1,9 @@
+#!/bin/bash
+
 #### Test utils
 
 set -o errexit
+set -o pipefail
 
 # Configuration
 TEST_TEXT="HELLO WORLD"
@@ -11,6 +14,65 @@ TEST_TEXT_FILE_LENGTH=15
 BIG_FILE=big-file-s3fs.txt
 BIG_FILE_LENGTH=$((25 * 1024 * 1024))
 export RUN_DIR
+
+if [ `uname` = "Darwin" ]; then
+    export SED_BUFFER_FLAG="-l"
+else
+    export SED_BUFFER_FLAG="--unbuffered"
+fi
+
+function get_xattr() {
+    if [ `uname` = "Darwin" ]; then
+        xattr -p "$1" "$2"
+    else
+        getfattr -n "$1" --only-values "$2"
+    fi
+}
+
+function set_xattr() {
+    if [ `uname` = "Darwin" ]; then
+        xattr -w "$1" "$2" "$3"
+    else
+        setfattr -n "$1" -v "$2" "$3"
+    fi
+}
+
+function del_xattr() {
+    if [ `uname` = "Darwin" ]; then
+        xattr -d "$1" "$2"
+    else
+        setfattr -x "$1" "$2"
+    fi
+}
+
+function get_size() {
+    if [ `uname` = "Darwin" ]; then
+        stat -f "%z" "$1"
+    else
+        stat -c %s "$1"
+    fi
+}
+
+function check_file_size() {
+    FILE_NAME="$1"
+    EXPECTED_SIZE="$2"
+
+    # Verify file is zero length via metadata
+    size=$(get_size ${FILE_NAME})
+    if [ $size -ne $EXPECTED_SIZE ]
+    then
+        echo "error: expected ${FILE_NAME} to be zero length"
+        return 1
+    fi
+
+    # Verify file is zero length via data
+    size=$(cat ${FILE_NAME} | wc -c)
+    if [ $size -ne $EXPECTED_SIZE ]
+    then
+        echo "error: expected ${FILE_NAME} to be $EXPECTED_SIZE length, got $size"
+        return 1
+    fi
+}
 
 function mk_test_file {
     if [ $# == 0 ]; then
@@ -80,7 +142,8 @@ function cd_run_dir {
         echo "TEST_BUCKET_MOUNT_POINT variable not set"
         exit 1
     fi
-    RUN_DIR=$(mktemp -d ${TEST_BUCKET_MOUNT_POINT_1}/testrun-XXXXXX)
+    RUN_DIR=${TEST_BUCKET_MOUNT_POINT_1}/${1}
+    mkdir -p ${RUN_DIR}
     cd ${RUN_DIR}
 }
 
@@ -120,7 +183,7 @@ function add_tests {
 # Log test name and description
 #    describe [DESCRIPTION]
 function describe {
-    echo "${FUNCNAME[1]}: "$@""
+    echo "${FUNCNAME[1]}: \"$*\""
 }
 
 # Runs each test in a suite and summarizes results.  The list of
@@ -129,7 +192,8 @@ function describe {
 # made after the test run.  
 function run_suite {
    orig_dir=$PWD
-   cd_run_dir
+   key_prefix="testrun-$RANDOM"
+   cd_run_dir $key_prefix
    for t in "${TEST_LIST[@]}"; do
        # The following sequence runs tests in a subshell to allow continuation
        # on test failure, but still allowing errexit to be in effect during
@@ -140,7 +204,7 @@ function run_suite {
        # Other ways of trying to capture the return value will also disable
        # errexit in the function due to bash... compliance with POSIX? 
        set +o errexit
-       (set -o errexit; $t)
+       (set -o errexit; $t $key_prefix)
        if [[ $? == 0 ]]; then
            report_pass $t
        else
@@ -184,4 +248,21 @@ function get_mtime() {
     else
         stat -c %Y "$1"
     fi
+}
+function check_content_type() {
+    INFO_STR=`aws_cli s3api head-object --bucket ${TEST_BUCKET_1} --key $1`
+    if [[ "${INFO_STR}" != *"$2"* ]]
+    then
+        echo "moved file content-type is not as expected expected:$2 got:${INFO_STR}"
+        exit 1
+    fi
+}
+
+function get_disk_avail_size() {
+    DISK_AVAIL_SIZE=`BLOCKSIZE=$((1024 * 1024)) df $1 | awk '{print $4}' | tail -n 1`
+    echo ${DISK_AVAIL_SIZE}
+}
+
+function aws_cli() {
+    AWS_ACCESS_KEY_ID=local-identity AWS_SECRET_ACCESS_KEY=local-credential aws $* --endpoint-url "${S3_URL}" --no-verify-ssl 
 }

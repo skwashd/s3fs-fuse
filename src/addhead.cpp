@@ -18,9 +18,9 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <syslog.h>
 #include <curl/curl.h>
 #include <sstream>
@@ -84,7 +84,7 @@ bool AdditionalHeader::Load(const char* file)
 
   // read file
   string   line;
-  PADDHEAD paddhead;
+  ADDHEAD *paddhead;
   while(getline(AH, line)){
     if('#' == line[0]){
       continue;
@@ -168,8 +168,8 @@ void AdditionalHeader::Unload()
 {
   is_enable = false;
 
-  for(addheadlist_t::iterator iter = addheadlist.begin(); iter != addheadlist.end(); iter = addheadlist.erase(iter)){
-    PADDHEAD paddhead = *iter;
+  for(addheadlist_t::iterator iter = addheadlist.begin(); iter != addheadlist.end(); ++iter){
+    ADDHEAD *paddhead = *iter;
     if(paddhead){
       if(paddhead->pregex){
         regfree(paddhead->pregex);
@@ -178,6 +178,7 @@ void AdditionalHeader::Unload()
       delete paddhead;
     }
   }
+  addheadlist.clear();
 }
 
 bool AdditionalHeader::AddHeader(headers_t& meta, const char* path) const
@@ -198,7 +199,7 @@ bool AdditionalHeader::AddHeader(headers_t& meta, const char* path) const
   // Because to allow duplicate key, and then scanning the entire table.
   //
   for(addheadlist_t::const_iterator iter = addheadlist.begin(); iter != addheadlist.end(); ++iter){
-    const PADDHEAD paddhead = *iter;
+    const ADDHEAD *paddhead = *iter;
     if(!paddhead){
       continue;
     }
@@ -251,7 +252,7 @@ bool AdditionalHeader::Dump() const
   ssdbg << "Additional Header list[" << addheadlist.size() << "] = {" << endl;
 
   for(addheadlist_t::const_iterator iter = addheadlist.begin(); iter != addheadlist.end(); ++iter, ++cnt){
-    const PADDHEAD paddhead = *iter;
+    const ADDHEAD *paddhead = *iter;
 
     ssdbg << "    [" << cnt << "] = {" << endl;
 

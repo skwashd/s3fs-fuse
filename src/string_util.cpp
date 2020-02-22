@@ -17,13 +17,15 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
-#include <limits.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <cerrno>
+#include <climits>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <syslog.h>
-#include <time.h>
+#include <ctime>
 
+#include <stdexcept>
 #include <sstream>
 #include <string>
 #include <map>
@@ -50,45 +52,18 @@ template std::string str(unsigned long long value);
 
 static const char hexAlphabet[] = "0123456789ABCDEF";
 
-off_t s3fs_strtoofft(const char* str, bool is_base_16)
+// replacement for C++11 std::stoll
+off_t s3fs_strtoofft(const char* str, int base)
 {
-  if(!str || '\0' == *str){
-    return 0;
+  errno = 0;
+  char *temp;
+  long long result = strtoll(str, &temp, base);
+
+  if(temp == str || *temp != '\0'){
+    throw std::invalid_argument("s3fs_strtoofft");
   }
-  off_t  result;
-  bool   chk_space;
-  bool   chk_base16_prefix;
-  for(result = 0, chk_space = false, chk_base16_prefix = false; '\0' != *str; str++){
-    // check head space
-    if(!chk_space && isspace(*str)){
-      continue;
-    }else if(!chk_space){
-      chk_space = true;
-    }
-    // check prefix for base 16
-    if(!chk_base16_prefix){
-      chk_base16_prefix = true;
-      if('0' == *str && ('x' == str[1] || 'X' == str[1])){
-        is_base_16 = true;
-        str++;
-        continue;
-      }
-    }
-    // check like isalnum and set data
-    result *= (is_base_16 ? 16 : 10);
-    if('0' <= *str && '9' >= *str){
-      result += static_cast<off_t>(*str - '0');
-    }else if(is_base_16){
-      if('A' <= *str && *str <= 'F'){
-        result += static_cast<off_t>(*str - 'A' + 0x0a);
-      }else if('a' <= *str && *str <= 'f'){
-        result += static_cast<off_t>(*str - 'a' + 0x0a);
-      }else{
-        return 0;
-      }
-    }else{
-      return 0;
-    }
+  if((result == LLONG_MIN || result == LLONG_MAX) && errno == ERANGE){
+    throw std::out_of_range("s3fs_strtoofft");
   }
   return result;
 }
@@ -96,7 +71,7 @@ off_t s3fs_strtoofft(const char* str, bool is_base_16)
 string lower(string s)
 {
   // change each character of the string to lower case
-  for(unsigned int i = 0; i < s.length(); i++){
+  for(size_t i = 0; i < s.length(); i++){
     s[i] = tolower(s[i]);
   }
   return s;
@@ -132,7 +107,7 @@ string trim(const string &s, const string &t /* = SPACES */)
 string urlEncode(const string &s)
 {
   string result;
-  for (unsigned i = 0; i < s.length(); ++i) {
+  for (size_t i = 0; i < s.length(); ++i) {
     char c = s[i];
     if (c == '/' // Note- special case for fuse paths...
       || c == '.'
@@ -160,7 +135,7 @@ string urlEncode(const string &s)
 string urlEncode2(const string &s)
 {
   string result;
-  for (unsigned i = 0; i < s.length(); ++i) {
+  for (size_t i = 0; i < s.length(); ++i) {
     char c = s[i];
     if (c == '=' // Note- special case for fuse paths...
       || c == '&' // Note- special case for s3...
@@ -185,11 +160,11 @@ string urlEncode2(const string &s)
 string urlDecode(const string& s)
 {
   string result;
-  for(unsigned i = 0; i < s.length(); ++i){
+  for(size_t i = 0; i < s.length(); ++i){
     if(s[i] != '%'){
       result += s[i];
     }else{
-      char ch = 0;
+      int ch = 0;
       if(s.length() <= ++i){
         break;       // wrong format.
       }
@@ -199,7 +174,7 @@ string urlDecode(const string& s)
       }
       ch *= 16;
       ch += ('0' <= s[i] && s[i] <= '9') ? (s[i] - '0') : ('A' <= s[i] && s[i] <= 'F') ? (s[i] - 'A' + 0x0a) : ('a' <= s[i] && s[i] <= 'f') ? (s[i] - 'a' + 0x0a) : 0x00;
-      result += ch;
+      result += static_cast<char>(ch);
     }
   }
   return result;
@@ -259,7 +234,8 @@ string get_date_rfc850()
 {
   char buf[100];
   time_t t = time(NULL);
-  strftime(buf, sizeof(buf), "%a, %d %b %Y %H:%M:%S GMT", gmtime(&t));
+  struct tm res;
+  strftime(buf, sizeof(buf), "%a, %d %b %Y %H:%M:%S GMT", gmtime_r(&t, &res));
   return buf;
 }
 
@@ -273,14 +249,16 @@ void get_date_sigv3(string& date, string& date8601)
 string get_date_string(time_t tm)
 {
   char buf[100];
-  strftime(buf, sizeof(buf), "%Y%m%d", gmtime(&tm));
+  struct tm res;
+  strftime(buf, sizeof(buf), "%Y%m%d", gmtime_r(&tm, &res));
   return buf;
 }
 
 string get_date_iso8601(time_t tm)
 {
   char buf[100];
-  strftime(buf, sizeof(buf), "%Y%m%dT%H%M%SZ", gmtime(&tm));
+  struct tm res;
+  strftime(buf, sizeof(buf), "%Y%m%dT%H%M%SZ", gmtime_r(&tm, &res));
   return buf;
 }
 
@@ -372,9 +350,7 @@ char* s3fs_base64(const unsigned char* input, size_t length)
   if(!input || 0 == length){
     return NULL;
   }
-  if(NULL == (result = reinterpret_cast<char*>(malloc((((length / 3) + 1) * 4 + 1) * sizeof(char))))){
-    return NULL; // ENOMEM
-  }
+  result = new char[((length / 3) + 1) * 4 + 1];
 
   unsigned char parts[4];
   size_t rpos;
@@ -422,9 +398,7 @@ unsigned char* s3fs_decode64(const char* input, size_t* plength)
   if(!input || 0 == strlen(input) || !plength){
     return NULL;
   }
-  if(NULL == (result = reinterpret_cast<unsigned char*>(malloc((strlen(input) + 1))))){
-    return NULL; // ENOMEM
-  }
+  result = new unsigned char[strlen(input) + 1];
 
   unsigned char parts[4];
   size_t input_len = strlen(input);
@@ -476,8 +450,9 @@ bool s3fs_wtf8_encode(const char *s, string *result)
 
     // single byte encoding
     if (c <= 0x7f) {
-      if (result)
-	*result += c;
+      if (result) {
+        *result += c;
+      }
       continue;
     }
 
@@ -528,9 +503,9 @@ bool s3fs_wtf8_encode(const char *s, string *result)
     invalid = true;
     if (result) {
       unsigned escape = escape_base + c;
-      *result += 0xe0 | ((escape >> 12) & 0x0f);
-      *result += 0x80 | ((escape >> 06) & 0x3f);
-      *result += 0x80 | ((escape >> 00) & 0x3f);
+      *result += static_cast<char>(0xe0 | ((escape >> 12) & 0x0f));
+      *result += static_cast<char>(0x80 | ((escape >> 06) & 0x3f));
+      *result += static_cast<char>(0x80 | ((escape >> 00) & 0x3f));
     }
   }
   return invalid;
@@ -558,14 +533,16 @@ bool s3fs_wtf8_decode(const char *s, string *result)
       if (code >= escape_base && code <= escape_base + 0xff) {
         // convert back
         encoded = true;
-        if (result)
-          *result += code - escape_base;
+        if(result){
+          *result += static_cast<char>(code - escape_base);
+        }
         s+=2;
         continue;
       }
     }
-    if (result)
+    if (result) {
       *result += c;
+    }
   }
   return encoded;
 }

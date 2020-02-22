@@ -18,7 +18,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
 
-#include <stdio.h>
+#include <cstdio>
 #include <sys/stat.h>
 #include <sys/types.h>
 #ifndef HAVE_CLOCK_GETTIME
@@ -27,7 +27,7 @@
 #include <unistd.h>
 #include <stdint.h>
 #include <pthread.h>
-#include <string.h>
+#include <cstring>
 #include <syslog.h>
 #include <string>
 #include <map>
@@ -87,7 +87,7 @@ inline void InitStatCacheTime(struct timespec& ts)
   ts.tv_nsec = 0;
 }
 
-inline int CompareStatCacheTime(struct timespec& ts1, struct timespec& ts2)
+inline int CompareStatCacheTime(const struct timespec& ts1, const struct timespec& ts2)
 {
   // return -1:  ts1 < ts2
   //         0:  ts1 == ts2
@@ -114,7 +114,7 @@ inline bool IsExpireStatCacheTime(const struct timespec& ts, const time_t& expir
 }
 
 //
-// For cache out 
+// For stats cache out 
 //
 typedef std::vector<stat_cache_t::iterator>   statiterlist_t;
 
@@ -123,6 +123,25 @@ struct sort_statiterlist{
   bool operator()(const stat_cache_t::iterator& src1, const stat_cache_t::iterator& src2) const
   {
     int result = CompareStatCacheTime(src1->second->cache_date, src2->second->cache_date);
+    if(0 == result){
+      if(src1->second->hit_count < src2->second->hit_count){
+        result = -1;
+      }
+    }
+    return (result < 0);
+  }
+};
+
+//
+// For symbolic link cache out 
+//
+typedef std::vector<symlink_cache_t::iterator>   symlinkiterlist_t;
+
+struct sort_symlinkiterlist{
+  // ascending order
+  bool operator()(const symlink_cache_t::iterator& src1, const symlink_cache_t::iterator& src2) const
+  {
+    int result = CompareStatCacheTime(src1->second->cache_date, src2->second->cache_date);  // use the same as Stats
     if(0 == result){
       if(src1->second->hit_count < src2->second->hit_count){
         result = -1;
@@ -147,7 +166,9 @@ StatCache::StatCache() : IsExpireTime(false), IsExpireIntervalType(false), Expir
     stat_cache.clear();
     pthread_mutexattr_t attr;
     pthread_mutexattr_init(&attr);
-    pthread_mutexattr_settype(&attr, S3FS_MUTEX_RECURSIVE);
+#if S3FS_PTHREAD_ERRORCHECK
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK);
+#endif
     pthread_mutex_init(&StatCache::stat_cache_lock, &attr);
   }else{
     abort();
@@ -220,7 +241,7 @@ void StatCache::Clear()
   S3FS_MALLOCTRIM(0);
 }
 
-bool StatCache::GetStat(string& key, struct stat* pst, headers_t* meta, bool overcheck, const char* petag, bool* pisforce)
+bool StatCache::GetStat(const string& key, struct stat* pst, headers_t* meta, bool overcheck, const char* petag, bool* pisforce)
 {
   bool is_delete_cache = false;
   string strpath = key;
@@ -243,7 +264,7 @@ bool StatCache::GetStat(string& key, struct stat* pst, headers_t* meta, bool ove
       if(ent->noobjcache){
         if(!IsCacheNoObject){
           // need to delete this cache.
-          DelStat(strpath);
+          DelStat(strpath, /*lock_already_held=*/ true);
         }else{
           // noobjcache = true means no object.
         }
@@ -266,12 +287,12 @@ bool StatCache::GetStat(string& key, struct stat* pst, headers_t* meta, bool ove
       }
       if(is_delete_cache){
         // not hit by different ETag
-        S3FS_PRN_DBG("stat cache not hit by ETag[path=%s][time=%jd.%09ld][hit count=%lu][ETag(%s)!=(%s)]",
-          strpath.c_str(), (intmax_t)(ent->cache_date.tv_sec), ent->cache_date.tv_nsec, ent->hit_count, petag ? petag : "null", stretag.c_str());
+        S3FS_PRN_DBG("stat cache not hit by ETag[path=%s][time=%lld.%09ld][hit count=%lu][ETag(%s)!=(%s)]",
+          strpath.c_str(), static_cast<long long>(ent->cache_date.tv_sec), ent->cache_date.tv_nsec, ent->hit_count, petag ? petag : "null", stretag.c_str());
       }else{
         // hit 
-        S3FS_PRN_DBG("stat cache hit [path=%s][time=%jd.%09ld][hit count=%lu]",
-          strpath.c_str(), (intmax_t)(ent->cache_date.tv_sec), ent->cache_date.tv_nsec, ent->hit_count);
+        S3FS_PRN_DBG("stat cache hit [path=%s][time=%lld.%09ld][hit count=%lu]",
+          strpath.c_str(), static_cast<long long>(ent->cache_date.tv_sec), ent->cache_date.tv_nsec, ent->hit_count);
 
         if(pst!= NULL){
           *pst= ent->stbuf;
@@ -297,12 +318,12 @@ bool StatCache::GetStat(string& key, struct stat* pst, headers_t* meta, bool ove
   }
 
   if(is_delete_cache){
-    DelStat(strpath);
+    DelStat(strpath, /*lock_already_held=*/ true);
   }
   return false;
 }
 
-bool StatCache::IsNoObjectCache(string& key, bool overcheck)
+bool StatCache::IsNoObjectCache(const string& key, bool overcheck)
 {
   bool is_delete_cache = false;
   string strpath = key;
@@ -337,12 +358,12 @@ bool StatCache::IsNoObjectCache(string& key, bool overcheck)
   }
 
   if(is_delete_cache){
-    DelStat(strpath);
+    DelStat(strpath, /*lock_already_held=*/ true);
   }
   return false;
 }
 
-bool StatCache::AddStat(std::string& key, headers_t& meta, bool forcedir, bool no_truncate)
+bool StatCache::AddStat(const std::string& key, headers_t& meta, bool forcedir, bool no_truncate)
 {
   if(!no_truncate && CacheSize< 1){
     return true;
@@ -406,10 +427,18 @@ bool StatCache::AddStat(std::string& key, headers_t& meta, bool forcedir, bool n
   }
   stat_cache[key] = ent;
 
+  // check symbolic link cache
+  if(!S_ISLNK(ent->stbuf.st_mode)){
+    if(symlink_cache.end() != symlink_cache.find(key)){
+      // if symbolic link cache has key, thus remove it.
+      DelSymlink(key.c_str(), true);
+    }
+  }
+
   return true;
 }
 
-bool StatCache::AddNoObjectCache(string& key)
+bool StatCache::AddNoObjectCache(const string& key)
 {
   if(!IsCacheNoObject){
     return true;    // pretend successful
@@ -456,6 +485,12 @@ bool StatCache::AddNoObjectCache(string& key)
     stat_cache.erase(iter);
   }
   stat_cache[key] = ent;
+
+  // check symbolic link cache
+  if(symlink_cache.end() != symlink_cache.find(key)){
+    // if symbolic link cache has key, thus remove it.
+    DelSymlink(key.c_str(), true);
+  }
 
   return true;
 }
@@ -536,14 +571,14 @@ bool StatCache::TruncateCache()
   return true;
 }
 
-bool StatCache::DelStat(const char* key)
+bool StatCache::DelStat(const char* key, bool lock_already_held)
 {
   if(!key){
     return false;
   }
   S3FS_PRN_INFO3("delete stat cache entry[path=%s]", key);
 
-  AutoLock lock(&StatCache::stat_cache_lock);
+  AutoLock lock(&StatCache::stat_cache_lock, lock_already_held ? AutoLock::ALREADY_LOCKED : AutoLock::NONE);
 
   stat_cache_t::iterator iter;
   if(stat_cache.end() != (iter = stat_cache.find(string(key)))){
@@ -563,6 +598,151 @@ bool StatCache::DelStat(const char* key)
       delete (*iter).second;
       stat_cache.erase(iter);
     }
+  }
+  S3FS_MALLOCTRIM(0);
+
+  return true;
+}
+
+bool StatCache::GetSymlink(const string& key, string& value)
+{
+  bool is_delete_cache = false;
+  string strpath = key;
+
+  AutoLock lock(&StatCache::stat_cache_lock);
+
+  symlink_cache_t::iterator iter = symlink_cache.find(strpath);
+  if(iter != symlink_cache.end() && iter->second){
+    symlink_cache_entry* ent = iter->second;
+    if(!IsExpireTime || !IsExpireStatCacheTime(ent->cache_date, ExpireTime)){   // use the same as Stats
+        // found
+        S3FS_PRN_DBG("symbolic link cache hit [path=%s][time=%lld.%09ld][hit count=%lu]",
+          strpath.c_str(), static_cast<long long>(ent->cache_date.tv_sec), ent->cache_date.tv_nsec, ent->hit_count);
+
+        value = ent->link;
+
+        ent->hit_count++;
+        if(IsExpireIntervalType){
+          SetStatCacheTime(ent->cache_date);
+        }
+        return true;
+    }else{
+      // timeout
+      is_delete_cache = true;
+    }
+  }
+
+  if(is_delete_cache){
+    DelSymlink(strpath.c_str(), /*lock_already_held=*/ true);
+  }
+  return false;
+}
+
+bool StatCache::AddSymlink(const string& key, const string& value)
+{
+  if(CacheSize< 1){
+    return true;
+  }
+  S3FS_PRN_INFO3("add symbolic link cache entry[path=%s, value=%s]", key.c_str(), value.c_str());
+
+  bool found;
+  bool do_truncate;
+  {
+    AutoLock lock(&StatCache::stat_cache_lock);
+    found       = symlink_cache.end() != symlink_cache.find(key);
+    do_truncate = symlink_cache.size() > CacheSize;
+  }
+
+  if(found){
+    DelSymlink(key.c_str());
+  }else{
+    if(do_truncate){
+      if(!TruncateSymlink()){
+        return false;
+      }
+    }
+  }
+
+  // make new
+  symlink_cache_entry* ent = new symlink_cache_entry();
+  ent->link       = value;
+  ent->hit_count  = 0;
+  SetStatCacheTime(ent->cache_date);    // Set time(use the same as Stats).
+
+  // add
+  AutoLock lock(&StatCache::stat_cache_lock);
+
+  symlink_cache_t::iterator iter = symlink_cache.find(key);   // recheck for same key exists
+  if(symlink_cache.end() != iter){
+    delete iter->second;
+    symlink_cache.erase(iter);
+  }
+  symlink_cache[key] = ent;
+
+  return true;
+}
+
+bool StatCache::TruncateSymlink()
+{
+  AutoLock lock(&StatCache::stat_cache_lock);
+
+  if(symlink_cache.empty()){
+    return true;
+  }
+
+  // 1) erase over expire time
+  if(IsExpireTime){
+    for(symlink_cache_t::iterator iter = symlink_cache.begin(); iter != symlink_cache.end(); ){
+      symlink_cache_entry* entry = iter->second;
+      if(!entry || IsExpireStatCacheTime(entry->cache_date, ExpireTime)){  // use the same as Stats
+        delete entry;
+        symlink_cache.erase(iter++);
+      }else{
+        ++iter;
+      }
+    }
+  }
+
+  // 2) check stat cache count
+  if(symlink_cache.size() < CacheSize){
+    return true;
+  }
+
+  // 3) erase from the old cache in order
+  size_t            erase_count= symlink_cache.size() - CacheSize + 1;
+  symlinkiterlist_t erase_iters;
+  for(symlink_cache_t::iterator iter = symlink_cache.begin(); iter != symlink_cache.end(); ++iter){
+    erase_iters.push_back(iter);
+    sort(erase_iters.begin(), erase_iters.end(), sort_symlinkiterlist());
+    if(erase_count < erase_iters.size()){
+      erase_iters.pop_back();
+    }
+  }
+  for(symlinkiterlist_t::iterator iiter = erase_iters.begin(); iiter != erase_iters.end(); ++iiter){
+    symlink_cache_t::iterator siter = *iiter;
+
+    S3FS_PRN_DBG("truncate symbolic link  cache[path=%s]", siter->first.c_str());
+    delete siter->second;
+    symlink_cache.erase(siter);
+  }
+  S3FS_MALLOCTRIM(0);
+
+  return true;
+}
+
+bool StatCache::DelSymlink(const char* key, bool lock_already_held)
+{
+  if(!key){
+    return false;
+  }
+  S3FS_PRN_INFO3("delete symbolic link cache entry[path=%s]", key);
+
+  AutoLock lock(&StatCache::stat_cache_lock, lock_already_held ? AutoLock::ALREADY_LOCKED : AutoLock::NONE);
+
+  symlink_cache_t::iterator iter;
+  if(symlink_cache.end() != (iter = symlink_cache.find(string(key)))){
+    delete iter->second;
+    symlink_cache.erase(iter);
   }
   S3FS_MALLOCTRIM(0);
 

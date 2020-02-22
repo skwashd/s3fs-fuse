@@ -18,11 +18,11 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <unistd.h>
-#include <errno.h>
+#include <cerrno>
 #include <libgen.h>
 #include <sys/stat.h>
 #include <pwd.h>
@@ -31,6 +31,9 @@
 #include <pthread.h>
 #include <sys/types.h>
 #include <dirent.h>
+#include <libxml/xpath.h>
+#include <libxml/xpathInternals.h>
+#include <libxml/tree.h>
 
 #include <string>
 #include <sstream>
@@ -49,6 +52,9 @@ using namespace std;
 // Global variables
 //-------------------------------------------------------------------
 std::string mount_prefix;
+
+static size_t max_password_size;
+static size_t max_group_name_length;
 
 //-------------------------------------------------------------------
 // Utility
@@ -318,22 +324,17 @@ MVNODE *create_mvnode(const char *old_path, const char *new_path, bool is_dir, b
   char *p_old_path;
   char *p_new_path;
 
-  p = (MVNODE *) malloc(sizeof(MVNODE));
-  if (p == NULL) {
-    printf("create_mvnode: could not allocation memory for p\n");
-    S3FS_FUSE_EXIT();
-    return NULL;
-  }
+  p = new MVNODE();
 
   if(NULL == (p_old_path = strdup(old_path))){
-    free(p);
+    delete p;
     printf("create_mvnode: could not allocation memory for p_old_path\n");
     S3FS_FUSE_EXIT();
     return NULL;
   }
 
   if(NULL == (p_new_path = strdup(new_path))){
-    free(p);
+    delete p;
     free(p_old_path);
     printf("create_mvnode: could not allocation memory for p_new_path\n");
     S3FS_FUSE_EXIT();
@@ -417,19 +418,35 @@ void free_mvnodes(MVNODE *head)
     next = my_head->next;
     free(my_head->old_path);
     free(my_head->new_path);
-    free(my_head);
+    delete my_head;
   }
 }
 
 //-------------------------------------------------------------------
 // Class AutoLock
 //-------------------------------------------------------------------
-AutoLock::AutoLock(pthread_mutex_t* pmutex, bool no_wait) : auto_mutex(pmutex)
+AutoLock::AutoLock(pthread_mutex_t* pmutex, Type type) : auto_mutex(pmutex)
 {
-  if (no_wait) {
-    is_lock_acquired = pthread_mutex_trylock(auto_mutex) == 0;
+  if (type == ALREADY_LOCKED) {
+    is_lock_acquired = false;
+  } else if (type == NO_WAIT) {
+    int res = pthread_mutex_trylock(auto_mutex);
+    if(res == 0){
+      is_lock_acquired = true;
+    }else if(res == EBUSY){
+      is_lock_acquired = false;
+    }else{
+      S3FS_PRN_CRIT("pthread_mutex_trylock returned: %d", res);
+      abort();
+    }
   } else {
-    is_lock_acquired = pthread_mutex_lock(auto_mutex) == 0;
+    int res = pthread_mutex_lock(auto_mutex);
+    if(res == 0){
+      is_lock_acquired = true;
+    }else{
+      S3FS_PRN_CRIT("pthread_mutex_lock returned: %d", res);
+      abort();
+    }
   }
 }
 
@@ -445,116 +462,99 @@ AutoLock::~AutoLock()
   }
 }
 
+void init_sysconf_vars()
+{
+  // SUSv4tc1 says the following about _SC_GETGR_R_SIZE_MAX and
+  // _SC_GETPW_R_SIZE_MAX:
+  // Note that sysconf(_SC_GETGR_R_SIZE_MAX) may return -1 if
+  // there is no hard limit on the size of the buffer needed to
+  // store all the groups returned.
+
+  long res = sysconf(_SC_GETPW_R_SIZE_MAX);
+  if(0 > res){
+    if (errno != 0){
+      S3FS_PRN_WARN("could not get max pw length.");
+      abort();
+    }
+    res = 1024; // default initial length
+  }
+  max_password_size = res;
+
+  res = sysconf(_SC_GETGR_R_SIZE_MAX);
+  if(0 > res) {
+    if (errno != 0) {
+      S3FS_PRN_ERR("could not get max name length.");
+      abort();
+    }
+    res = 1024; // default initial length
+  }
+  max_group_name_length = res;
+}
+
 //-------------------------------------------------------------------
 // Utility for UID/GID
 //-------------------------------------------------------------------
 // get user name from uid
 string get_username(uid_t uid)
 {
-  static size_t maxlen = 0;	// set once
+  size_t maxlen = max_password_size;
   int result;
   char* pbuf;
   struct passwd pwinfo;
   struct passwd* ppwinfo = NULL;
 
   // make buffer
-  if(0 == maxlen){
-    long res = sysconf(_SC_GETPW_R_SIZE_MAX);
-    if(0 > res){
-      // SUSv4tc1 says the following about _SC_GETGR_R_SIZE_MAX and
-      // _SC_GETPW_R_SIZE_MAX:
-      // Note that sysconf(_SC_GETGR_R_SIZE_MAX) may return -1 if
-      // there is no hard limit on the size of the buffer needed to
-      // store all the groups returned.
-      if (errno != 0){
-        S3FS_PRN_WARN("could not get max pw length.");
-        maxlen = 0;
-        return string("");
-      }
-      res = 1024; // default initial length
-    }
-    maxlen = res;
-  }
-  if(NULL == (pbuf = (char*)malloc(sizeof(char) * maxlen))){
-    S3FS_PRN_CRIT("failed to allocate memory.");
-    return string("");
-  }
+  pbuf = new char[maxlen];
   // get pw information
   while(ERANGE == (result = getpwuid_r(uid, &pwinfo, pbuf, maxlen, &ppwinfo))){
-    free(pbuf);
+    delete[] pbuf;
     maxlen *= 2;
-    if(NULL == (pbuf = (char*)malloc(sizeof(char) * maxlen))){
-      S3FS_PRN_CRIT("failed to allocate memory.");
-      return string("");
-    }
+    pbuf = new char[maxlen];
   }
 
   if(0 != result){
     S3FS_PRN_ERR("could not get pw information(%d).", result);
-    free(pbuf);
+    delete[] pbuf;
     return string("");
   }
 
   // check pw
   if(NULL == ppwinfo){
-    free(pbuf);
+    delete[] pbuf;
     return string("");
   }
   string name = SAFESTRPTR(ppwinfo->pw_name);
-  free(pbuf);
+  delete[] pbuf;
   return name;
 }
 
 int is_uid_include_group(uid_t uid, gid_t gid)
 {
-  static size_t maxlen = 0;	// set once
+  size_t maxlen = max_group_name_length;
   int result;
   char* pbuf;
   struct group ginfo;
   struct group* pginfo = NULL;
 
   // make buffer
-  if(0 == maxlen){
-    long res = sysconf(_SC_GETGR_R_SIZE_MAX);
-    if(0 > res) {
-      // SUSv4tc1 says the following about _SC_GETGR_R_SIZE_MAX and
-      // _SC_GETPW_R_SIZE_MAX:
-      // Note that sysconf(_SC_GETGR_R_SIZE_MAX) may return -1 if
-      // there is no hard limit on the size of the buffer needed to
-      // store all the groups returned.
-      if (errno != 0) {
-        S3FS_PRN_ERR("could not get max name length.");
-        maxlen = 0;
-        return -ERANGE;
-      }
-      res = 1024; // default initial length
-    }
-    maxlen = res;
-  }
-  if(NULL == (pbuf = (char*)malloc(sizeof(char) * maxlen))){
-    S3FS_PRN_CRIT("failed to allocate memory.");
-    return -ENOMEM;
-  }
+  pbuf = new char[maxlen];
   // get group information
   while(ERANGE == (result = getgrgid_r(gid, &ginfo, pbuf, maxlen, &pginfo))){
-    free(pbuf);
+    delete[] pbuf;
     maxlen *= 2;
-    if(NULL == (pbuf = (char*)malloc(sizeof(char) * maxlen))){
-      S3FS_PRN_CRIT("failed to allocate memory.");
-      return -ENOMEM;
-    }
+    pbuf = new char[maxlen];
   }
 
   if(0 != result){
     S3FS_PRN_ERR("could not get group information(%d).", result);
-    free(pbuf);
+    delete[] pbuf;
     return -result;
   }
 
   // check group
   if(NULL == pginfo){
     // there is not gid in group.
-    free(pbuf);
+    delete[] pbuf;
     return -EINVAL;
   }
 
@@ -564,11 +564,11 @@ int is_uid_include_group(uid_t uid, gid_t gid)
   for(ppgr_mem = pginfo->gr_mem; ppgr_mem && *ppgr_mem; ppgr_mem++){
     if(username == *ppgr_mem){
       // Found username in group.
-      free(pbuf);
+      delete[] pbuf;
       return 1;
     }
   }
-  free(pbuf);
+  delete[] pbuf;
   return 0;
 }
 
@@ -989,6 +989,50 @@ bool is_need_check_obj_detail(headers_t& meta)
   return true;
 }
 
+bool simple_parse_xml(const char* data, size_t len, const char* key, std::string& value)
+{
+  bool result = false;
+
+  if(!data || !key){
+    return false;
+  }
+  value.clear();
+
+  xmlDocPtr doc;
+  if(NULL == (doc = xmlReadMemory(data, len, "", NULL, 0))){
+    return false;
+  }
+
+  if(NULL == doc->children){
+    S3FS_XMLFREEDOC(doc);
+    return false;
+  }
+  for(xmlNodePtr cur_node = doc->children->children; NULL != cur_node; cur_node = cur_node->next){
+    // For DEBUG
+    // string cur_node_name(reinterpret_cast<const char *>(cur_node->name));
+    // printf("cur_node_name: %s\n", cur_node_name.c_str());
+
+    if(XML_ELEMENT_NODE == cur_node->type){
+      string elementName = reinterpret_cast<const char*>(cur_node->name);
+      // For DEBUG
+      // printf("elementName: %s\n", elementName.c_str());
+
+      if(cur_node->children){
+        if(XML_TEXT_NODE == cur_node->children->type){
+          if(elementName == key) {
+            value = reinterpret_cast<const char *>(cur_node->children->content);
+            result    = true;
+            break;
+          }
+        }
+      }
+    }
+  }
+  S3FS_XMLFREEDOC(doc);
+
+  return result;
+}
+
 //-------------------------------------------------------------------
 // Help
 //-------------------------------------------------------------------
@@ -1008,9 +1052,9 @@ void show_help ()
     "Usage:\n"
     "   mounting\n"
     "     s3fs bucket[:/path] mountpoint [options]\n"
-    "     s3fs mountpoint [options(must specify bucket= option)]\n"
+    "     s3fs mountpoint [options (must specify bucket= option)]\n"
     "\n"
-    "   umounting\n"
+    "   unmounting\n"
     "     umount mountpoint\n"
     "\n"
     "   General forms for s3fs and FUSE/mount options:\n"
@@ -1018,7 +1062,7 @@ void show_help ()
     "      -o opt [-o opt] ...\n"
     "\n"
     "   utility mode (remove interrupted multipart uploading objects)\n"
-    "     s3fs --incomplete-mpu-list(-u) bucket\n"
+    "     s3fs --incomplete-mpu-list (-u) bucket\n"
     "     s3fs --incomplete-mpu-abort[=all | =<date format>] bucket\n"
     "\n"
     "s3fs Options:\n"
@@ -1028,25 +1072,24 @@ void show_help ()
     "             <option_name>=<option_value>\n"
     "\n"
     "   bucket\n"
-    "      - if it is not specified bucket name(and path) in command line,\n"
+    "      - if it is not specified bucket name (and path) in command line,\n"
     "        must specify this option after -o option for bucket name.\n"
     "\n"
     "   default_acl (default=\"private\")\n"
     "      - the default canned acl to apply to all written s3 objects,\n"
-    "        e.g., private, public-read.  empty string means do not send\n"
-    "        header.  see\n"
+    "        e.g., private, public-read.  see\n"
     "        https://docs.aws.amazon.com/AmazonS3/latest/dev/acl-overview.html#canned-acl\n"
     "        for the full list of canned acls\n"
     "\n"
     "   retries (default=\"5\")\n"
-    "      - number of times to retry a failed s3 transaction\n"
+    "      - number of times to retry a failed S3 transaction\n"
     "\n"
     "   use_cache (default=\"\" which means disabled)\n"
     "      - local folder to use for local file cache\n"
     "\n"
     "   check_cache_dir_exist (default is disable)\n"
     "      - if use_cache is set, check if the cache directory exists.\n"
-    "        if this option is not specified, it will be created at runtime\n"
+    "        If this option is not specified, it will be created at runtime\n"
     "        when the cache directory does not exist.\n"
     "\n"
     "   del_cache (delete local file cache)\n"
@@ -1054,7 +1097,13 @@ void show_help ()
     "\n"
     "   storage_class (default=\"standard\")\n"
     "      - store object with specified storage class.  Possible values:\n"
-    "        standard, standard_ia, onezone_ia and reduced_redundancy.\n"
+    "        standard, standard_ia, onezone_ia, reduced_redundancy and intelligent_tiering.\n"
+    "\n"
+    "   use_rrs (default is disable)\n"
+    "      - use Amazon's Reduced Redundancy Storage.\n"
+    "        this option can not be specified with use_sse.\n"
+    "        (can specify use_rrs=1 for old version)\n"
+    "        this option has been replaced by new storage_class option.\n"
     "\n"
     "   use_sse (default is disable)\n"
     "      - Specify three type Amazon's Server-Site Encryption: SSE-S3,\n"
@@ -1062,10 +1111,10 @@ void show_help ()
     "        keys, SSE-C uses customer-provided encryption keys, and\n"
     "        SSE-KMS uses the master key which you manage in AWS KMS.\n"
     "        You can specify \"use_sse\" or \"use_sse=1\" enables SSE-S3\n"
-    "        type(use_sse=1 is old type parameter).\n"
+    "        type (use_sse=1 is old type parameter).\n"
     "        Case of setting SSE-C, you can specify \"use_sse=custom\",\n"
     "        \"use_sse=custom:<custom key file path>\" or\n"
-    "        \"use_sse=<custom key file path>\"(only <custom key file path>\n"
+    "        \"use_sse=<custom key file path>\" (only <custom key file path>\n"
     "        specified is old type parameter). You can use \"c\" for\n"
     "        short \"custom\".\n"
     "        The custom key file must be 600 permission. The file can\n"
@@ -1075,9 +1124,9 @@ void show_help ()
     "        after first line, those are used downloading object which\n"
     "        are encrypted by not first key. So that, you can keep all\n"
     "        SSE-C keys in file, that is SSE-C key history.\n"
-    "        If you specify \"custom\"(\"c\") without file path, you\n"
+    "        If you specify \"custom\" (\"c\") without file path, you\n"
     "        need to set custom key by load_sse_c option or AWSSSECKEYS\n"
-    "        environment.(AWSSSECKEYS environment has some SSE-C keys\n"
+    "        environment. (AWSSSECKEYS environment has some SSE-C keys\n"
     "        with \":\" separator.) This option is used to decide the\n"
     "        SSE type. So that if you do not want to encrypt a object\n"
     "        object at uploading, but you need to decrypt encrypted\n"
@@ -1086,8 +1135,8 @@ void show_help ()
     "        For setting SSE-KMS, specify \"use_sse=kmsid\" or\n"
     "        \"use_sse=kmsid:<kms id>\". You can use \"k\" for short \"kmsid\".\n"
     "        If you san specify SSE-KMS type with your <kms id> in AWS\n"
-    "        KMS, you can set it after \"kmsid:\"(or \"k:\"). If you\n"
-    "        specify only \"kmsid\"(\"k\"), you need to set AWSSSEKMSID\n"
+    "        KMS, you can set it after \"kmsid:\" (or \"k:\"). If you\n"
+    "        specify only \"kmsid\" (\"k\"), you need to set AWSSSEKMSID\n"
     "        environment which value is <kms id>. You must be careful\n"
     "        about that you can not use the KMS id which is not same EC2\n"
     "        region.\n"
@@ -1113,13 +1162,13 @@ void show_help ()
     "\n"
     "   ahbe_conf (default=\"\" which means disabled)\n"
     "      - This option specifies the configuration file path which\n"
-    "      file is the additional HTTP header by file(object) extension.\n"
+    "      file is the additional HTTP header by file (object) extension.\n"
     "      The configuration file format is below:\n"
     "      -----------\n"
     "      line         = [file suffix or regex] HTTP-header [HTTP-values]\n"
-    "      file suffix  = file(object) suffix, if this field is empty,\n"
+    "      file suffix  = file (object) suffix, if this field is empty,\n"
     "                     it means \"reg:(.*)\".(=all object).\n"
-    "      regex        = regular expression to match the file(object) path.\n"
+    "      regex        = regular expression to match the file (object) path.\n"
     "                     this type starts with \"reg:\" prefix.\n"
     "      HTTP-header  = additional HTTP header name\n"
     "      HTTP-values  = additional HTTP header value\n"
@@ -1142,7 +1191,7 @@ void show_help ()
     "   connect_timeout (default=\"300\" seconds)\n"
     "      - time to wait for connection before giving up\n"
     "\n"
-    "   readwrite_timeout (default=\"60\" seconds)\n"
+    "   readwrite_timeout (default=\"120\" seconds)\n"
     "      - time to wait between read/write activity before giving up\n"
     "\n"
     "   list_object_max_keys (default=\"1000\")\n"
@@ -1150,25 +1199,37 @@ void show_help ()
     "        API. The default is 1000. you can set this value to 1000 or more.\n"
     "\n"
     "   max_stat_cache_size (default=\"100,000\" entries (about 40MB))\n"
-    "      - maximum number of entries in the stat cache\n"
+    "      - maximum number of entries in the stat cache, and this maximum is\n"
+    "        also treated as the number of symbolic link cache.\n"
     "\n"
     "   stat_cache_expire (default is no expire)\n"
-    "      - specify expire time(seconds) for entries in the stat cache.\n"
-    "        This expire time indicates the time since stat cached.\n"
+    "      - specify expire time (seconds) for entries in the stat cache.\n"
+    "        This expire time indicates the time since stat cached. and this\n"
+    "        is also set to the expire time of the symbolic link cache.\n"
+    "\n"
+    "   stat_cache_interval_expire (default is no expire)\n"
+    "      - specify expire time (seconds) for entries in the stat cache(and\n"
+    "        symbolic link cache).\n"
+    "      This expire time is based on the time from the last access time\n"
+    "      of the stat cache. This option is exclusive with stat_cache_expire,\n"
+    "      and is left for compatibility with older versions.\n"
     "\n"
     "   enable_noobj_cache (default is disable)\n"
     "      - enable cache entries for the object which does not exist.\n"
-    "      s3fs always has to check whether file(or sub directory) exists \n"
-    "      under object(path) when s3fs does some command, since s3fs has \n"
+    "      s3fs always has to check whether file (or sub directory) exists \n"
+    "      under object (path) when s3fs does some command, since s3fs has \n"
     "      recognized a directory which does not exist and has files or \n"
     "      sub directories under itself. It increases ListBucket request \n"
     "      and makes performance bad.\n"
     "      You can specify this option for performance, s3fs memorizes \n"
-    "      in stat cache that the object(file or directory) does not exist.\n"
+    "      in stat cache that the object (file or directory) does not exist.\n"
     "\n"
     "   no_check_certificate\n"
     "      - server certificate won't be checked against the available \n"
 	"      certificate authorities.\n"
+    "\n"
+    "   ssl_verify_hostname (default=\"2\")\n"
+    "      - When 0, do not verify the SSL certificate against the hostname.\n"
     "\n"
     "   nodnscache (disable dns cache)\n"
     "      - s3fs is always using dns cache, this option make dns cache disable.\n"
@@ -1182,7 +1243,7 @@ void show_help ()
     "\n"
     "   parallel_count (default=\"5\")\n"
     "      - number of parallel request for uploading big objects.\n"
-    "      s3fs uploads large object(over 20MB) by multipart post request, \n"
+    "      s3fs uploads large object (over 20MB) by multipart post request, \n"
     "      and sends parallel requests.\n"
     "      This option limits parallel request count which s3fs requests \n"
     "      at once. It is necessary to set this value depending on a CPU \n"
@@ -1190,9 +1251,12 @@ void show_help ()
     "\n"
     "   multipart_size (default=\"10\")\n"
     "      - part size, in MB, for each multipart request.\n"
+    "      The minimum value is 5 MB and the maximum value is 5 GB.\n"
     "\n"
     "   ensure_diskfree (default 0)\n"
-    "      - sets MB to ensure disk free space. s3fs makes file for\n"
+    "      - sets MB to ensure disk free space.  This option means the\n"
+	"        threshold of free space size on disk which is used for the\n"
+	"        cache file by s3fs.  s3fs makes file for\n"
     "        downloading, uploading and caching files. If the disk free\n"
     "        space is smaller than this value, s3fs do not use diskspace\n"
     "        as possible in exchange for the performance.\n"
@@ -1200,6 +1264,12 @@ void show_help ()
     "   singlepart_copy_limit (default=\"512\")\n"
     "      - maximum size, in MB, of a single-part copy before trying \n"
     "      multipart copy.\n"
+    "\n"
+    "   host (default=\"https://s3.amazonaws.com\")\n"
+    "      - Set a non-Amazon host, e.g., https://example.com.\n"
+    "\n"
+    "   servicepath (default=\"/\")\n"
+    "      - Set a service path when the non-Amazon host requires a prefix.\n"
     "\n"
     "   url (default=\"https://s3.amazonaws.com\")\n"
     "      - sets the url to use to access Amazon S3. If you want to use HTTP,\n"
@@ -1228,13 +1298,18 @@ void show_help ()
     "      this option, you can control the permissions of the\n"
     "      mount point by this option like umask.\n"
     "\n"
+    "   umask (default is \"0000\")\n"
+    "      - sets umask for files under the mountpoint.  This can allow\n"
+	"      users other than the mounting user to read and write to files\n"
+	"      that they did not create.\n"
+    "\n"
     "   nomultipart (disable multipart uploads)\n"
     "\n"
     "   enable_content_md5 (default is disable)\n"
     "      Allow S3 server to check data integrity of uploads via the\n"
     "      Content-MD5 header.  This can add CPU overhead to transfers.\n"
     "\n"
-    "   ecs\n"
+    "   ecs (default is disable)\n"
     "      - This option instructs s3fs to query the ECS container credential\n"
     "      metadata address instead of the instance metadata address.\n"
     "\n"
@@ -1244,16 +1319,16 @@ void show_help ()
     "      to an instance. If you specify this option without any argument, it\n"
     "      is the same as that you have specified the \"auto\".\n"
     "\n"
-    "   ibm_iam_auth\n"
+    "   ibm_iam_auth (default is not using IBM IAM authentication)\n"
     "      - This option instructs s3fs to use IBM IAM authentication.\n"
     "      In this mode, the AWSAccessKey and AWSSecretKey will be used as\n"
     "      IBM's Service-Instance-ID and APIKey, respectively.\n"
     "\n"
     "   ibm_iam_endpoint (default is https://iam.bluemix.net)\n"
-    "      - sets the url to use for IBM IAM authentication.\n"
+    "      - sets the URL to use for IBM IAM authentication.\n"
     "\n"
     "   use_xattr (default is not handling the extended attribute)\n"
-    "      Enable to handle the extended attribute(xattrs).\n"
+    "      Enable to handle the extended attribute (xattrs).\n"
     "      If you set this option, you can use the extended attribute.\n"
     "      For example, encfs and ecryptfs need to support the extended attribute.\n"
     "      Notice: if s3fs handles the extended attribute, s3fs can not work to\n"
@@ -1266,20 +1341,27 @@ void show_help ()
     "        This option should not be specified now, because s3fs looks up\n"
     "        xmlns automatically after v1.66.\n"
     "\n"
+    "   nomixupload (disable copy in multipart uploads)\n"
+    "        Disable to use PUT (copy api) when multipart uploading large size objects.\n"
+    "        By default, when doing multipart upload, the range of unchanged data\n"
+    "        will use PUT (copy api) whenever possible.\n"
+    "        When nocopyapi or norenameapi is specified, use of PUT (copy api) is\n"
+    "        invalidated even if this option is not specified.\n"
+    "\n"
     "   nocopyapi (for other incomplete compatibility object storage)\n"
     "        For a distributed object storage which is compatibility S3\n"
-    "        API without PUT(copy api).\n"
+    "        API without PUT (copy api).\n"
     "        If you set this option, s3fs do not use PUT with \n"
-    "        \"x-amz-copy-source\"(copy api). Because traffic is increased\n"
+    "        \"x-amz-copy-source\" (copy api). Because traffic is increased\n"
     "        2-3 times by this option, we do not recommend this.\n"
     "\n"
     "   norenameapi (for other incomplete compatibility object storage)\n"
     "        For a distributed object storage which is compatibility S3\n"
-    "        API without PUT(copy api).\n"
+    "        API without PUT (copy api).\n"
     "        This option is a subset of nocopyapi option. The nocopyapi\n"
-    "        option does not use copy-api for all command(ex. chmod, chown,\n"
+    "        option does not use copy-api for all command (ex. chmod, chown,\n"
     "        touch, mv, etc), but this option does not use copy-api for\n"
-    "        only rename command(ex. mv). If this option is specified with\n"
+    "        only rename command (ex. mv). If this option is specified with\n"
     "        nocopyapi, then s3fs ignores it.\n"
     "\n"
     "   use_path_request_style (use legacy API calling style)\n"
@@ -1293,17 +1375,7 @@ void show_help ()
     "        If this option is specified, s3fs suppresses the output of the\n"
     "        User-Agent.\n"
     "\n"
-    "   dbglevel (default=\"crit\")\n"
-    "        Set the debug message level. set value as crit(critical), err\n"
-    "        (error), warn(warning), info(information) to debug level.\n"
-    "        default debug level is critical. If s3fs run with \"-d\" option,\n"
-    "        the debug level is set information. When s3fs catch the signal\n"
-    "        SIGUSR2, the debug level is bumpup.\n"
-    "\n"
-    "   curldbg - put curl debug message\n"
-    "        Put the debug message from libcurl when this option is specified.\n"
-    "\n"
-    "   cipher_suites - customize TLS cipher suite list\n"
+    "   cipher_suites\n"
     "        Customize the list of TLS cipher suites.\n"
     "        Expects a colon separated list of cipher suite names.\n"
     "        A list of available cipher suites, depending on your TLS engine,\n"
@@ -1346,6 +1418,27 @@ void show_help ()
     "        Unicode set.\n"
     "        Useful on clients not using utf-8 as their file system encoding.\n"
     "\n"
+    "   use_session_token - indicate that session token should be provided.\n"
+    "        If credentials are provided by environment variables this switch\n"
+    "        forces presence check of AWSSESSIONTOKEN variable.\n"
+    "        Otherwise an error is returned."
+    "\n"
+    "   requester_pays (default is disable)\n"
+    "        This option instructs s3fs to enable requests involving\n"
+    "        Requester Pays buckets.\n"
+    "        It includes the 'x-amz-request-payer=requester' entry in the\n"
+    "        request header."
+    "\n"
+    "   dbglevel (default=\"crit\")\n"
+    "        Set the debug message level. set value as crit (critical), err\n"
+    "        (error), warn (warning), info (information) to debug level.\n"
+    "        default debug level is critical. If s3fs run with \"-d\" option,\n"
+    "        the debug level is set information. When s3fs catch the signal\n"
+    "        SIGUSR2, the debug level is bumpup.\n"
+    "\n"
+    "   curldbg - put curl debug message\n"
+    "        Put the debug message from libcurl when this option is specified.\n"
+    "\n"
     "FUSE/mount Options:\n"
     "\n"
     "   Most of the generic mount options described in 'man mount' are\n"
@@ -1362,12 +1455,12 @@ void show_help ()
     " -u, --incomplete-mpu-list\n"
     "        Lists multipart incomplete objects uploaded to the specified\n"
     "        bucket.\n"
-    " --incomplete-mpu-abort(=all or =<date format>)\n"
+    " --incomplete-mpu-abort (=all or =<date format>)\n"
     "        Delete the multipart incomplete object uploaded to the specified\n"
     "        bucket.\n"
     "        If \"all\" is specified for this option, all multipart incomplete\n"
     "        objects will be deleted. If you specify no argument as an option,\n"
-    "        objects older than 24 hours(24H) will be deleted(This is the\n"
+    "        objects older than 24 hours (24H) will be deleted (This is the\n"
     "        default value). You can specify an optional date format. It can\n"
     "        be specified as year, month, day, hour, minute, second, and it is\n"
     "        expressed as \"Y\", \"M\", \"D\", \"h\", \"m\", \"s\" respectively.\n"
@@ -1391,7 +1484,7 @@ void show_help ()
 void show_version()
 {
   printf(
-  "Amazon Simple Storage Service File System V%s(commit:%s) with %s\n"
+  "Amazon Simple Storage Service File System V%s (commit:%s) with %s\n"
   "Copyright (C) 2010 Randy Rizun <rrizun@gmail.com>\n"
   "License GPL2: GNU GPL version 2 <https://gnu.org/licenses/gpl.html>\n"
   "This is free software: you are free to change and redistribute it.\n"

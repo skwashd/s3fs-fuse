@@ -1,29 +1,21 @@
 #!/bin/bash
 
 set -o errexit
+set -o pipefail
 
 source test-utils.sh
 
 function test_append_file {
     describe "Testing append to file ..."
+    TEST_INPUT="echo ${TEST_TEXT} to ${TEST_TEXT_FILE}"
 
     # Write a small test file
-    if [ `uname` = "Darwin" ]; then
-       cat /dev/null > ${TEST_TEXT_FILE}
-    fi
     for x in `seq 1 $TEST_TEXT_FILE_LENGTH`
     do
-       echo "echo ${TEST_TEXT} to ${TEST_TEXT_FILE}"
+        echo $TEST_INPUT
     done > ${TEST_TEXT_FILE}
 
-    # Verify contents of file
-    echo "Verifying length of test file"
-    FILE_LENGTH=`wc -l $TEST_TEXT_FILE | awk '{print $1}'`
-    if [ "$FILE_LENGTH" -ne "$TEST_TEXT_FILE_LENGTH" ]
-    then
-       echo "error: expected $TEST_TEXT_FILE_LENGTH , got $FILE_LENGTH"
-       return 1
-    fi
+    check_file_size "${TEST_TEXT_FILE}" $(($TEST_TEXT_FILE_LENGTH * $(echo $TEST_INPUT | wc -c)))
 
     rm_test_file
 }
@@ -36,12 +28,8 @@ function test_truncate_file {
     # Truncate file to 0 length.  This should trigger open(path, O_RDWR | O_TRUNC...)
     : > ${TEST_TEXT_FILE}
 
-    # Verify file is zero length
-    if [ -s ${TEST_TEXT_FILE} ]
-    then
-        echo "error: expected ${TEST_TEXT_FILE} to be zero length"
-        return 1
-    fi
+    check_file_size "${TEST_TEXT_FILE}" 0
+
     rm_test_file
 }
 
@@ -54,17 +42,8 @@ function test_truncate_empty_file {
     t_size=1024
     truncate ${TEST_TEXT_FILE} -s $t_size
 
-    # Verify file is zero length
-    if [ `uname` = "Darwin" ]; then
-        size=$(stat -f "%z" ${TEST_TEXT_FILE})
-    else
-        size=$(stat -c %s ${TEST_TEXT_FILE})
-    fi
-    if [ $t_size -ne $size ]
-    then
-        echo "error: expected ${TEST_TEXT_FILE} to be $t_size length, got $size"
-        return 1
-    fi
+    check_file_size "${TEST_TEXT_FILE}" $t_size
+
     rm_test_file
 }
 
@@ -94,6 +73,12 @@ function test_mv_file {
     then
        echo "Could not move file"
        return 1
+    fi
+    
+    #check the renamed file content-type
+    if [ -f "/etc/mime.types" ]
+    then
+      check_content_type "$1/$ALT_TEST_TEXT_FILE" "text/plain"
     fi
 
     # Check the contents of the alt file
@@ -248,7 +233,14 @@ function test_chown {
         ORIGINAL_PERMISSIONS=$(stat --format=%u:%g $TEST_TEXT_FILE)
     fi
 
-    chown 1000:1000 $TEST_TEXT_FILE;
+    # [NOTE]
+    # Prevents test interruptions due to permission errors, etc.
+    # If the chown command fails, an error will occur with the
+    # following judgment statement. So skip the chown command error.
+    # '|| true' was added due to a problem with Travis CI and MacOS
+    # and ensure_diskfree option.
+    #
+    chown 1000:1000 $TEST_TEXT_FILE || true
 
     # if they're the same, we have a problem.
     if [ `uname` = "Darwin" ]; then
@@ -290,9 +282,31 @@ function test_remove_nonempty_directory {
     describe "Testing removing a non-empty directory"
     mk_test_dir
     touch "${TEST_DIR}/file"
-    rmdir "${TEST_DIR}" 2>&1 | grep -q "Directory not empty"
+    (
+        set +o pipefail
+        rmdir "${TEST_DIR}" 2>&1 | grep -q "Directory not empty"
+    )
     rm "${TEST_DIR}/file"
     rm_test_dir
+}
+
+function test_external_modification {
+    describe "Test external modification to an object"
+    echo "old" > ${TEST_TEXT_FILE}
+    OBJECT_NAME="$(basename $PWD)/${TEST_TEXT_FILE}"
+    sleep 2
+    echo "new new" | aws_cli s3 cp - "s3://${TEST_BUCKET_1}/${OBJECT_NAME}"
+    cmp ${TEST_TEXT_FILE} <(echo "new new")
+    rm -f ${TEST_TEXT_FILE}
+}
+
+function test_read_external_object() {
+    describe "create objects via aws CLI and read via s3fs"
+    OBJECT_NAME="$(basename $PWD)/${TEST_TEXT_FILE}"
+    sleep 3
+    echo "test" | aws_cli s3 cp - "s3://${TEST_BUCKET_1}/${OBJECT_NAME}"
+    cmp ${TEST_TEXT_FILE} <(echo "test")
+    rm -f ${TEST_TEXT_FILE}
 }
 
 function test_rename_before_close {
@@ -314,9 +328,6 @@ function test_rename_before_close {
 function test_multipart_upload {
     describe "Testing multi-part upload ..."
 
-    if [ `uname` = "Darwin" ]; then
-       cat /dev/null > $BIG_FILE
-    fi
     dd if=/dev/urandom of="/tmp/${BIG_FILE}" bs=$BIG_FILE_LENGTH count=1
     dd if="/tmp/${BIG_FILE}" of="${BIG_FILE}" bs=$BIG_FILE_LENGTH count=1
 
@@ -334,9 +345,6 @@ function test_multipart_upload {
 function test_multipart_copy {
     describe "Testing multi-part copy ..."
 
-    if [ `uname` = "Darwin" ]; then
-       cat /dev/null > $BIG_FILE
-    fi
     dd if=/dev/urandom of="/tmp/${BIG_FILE}" bs=$BIG_FILE_LENGTH count=1
     dd if="/tmp/${BIG_FILE}" of="${BIG_FILE}" bs=$BIG_FILE_LENGTH count=1
     mv "${BIG_FILE}" "${BIG_FILE}-copy"
@@ -348,18 +356,109 @@ function test_multipart_copy {
        return 1
     fi
 
+    #check the renamed file content-type
+    check_content_type "$1/${BIG_FILE}-copy" "application/octet-stream"
+
     rm -f "/tmp/${BIG_FILE}"
     rm_test_file "${BIG_FILE}-copy"
+}
+
+function test_multipart_mix {
+    describe "Testing multi-part mix ..."
+
+    if [ `uname` = "Darwin" ]; then
+       cat /dev/null > $BIG_FILE
+    fi
+    dd if=/dev/urandom of="/tmp/${BIG_FILE}" bs=$BIG_FILE_LENGTH seek=0 count=1
+    dd if="/tmp/${BIG_FILE}" of="${BIG_FILE}" bs=$BIG_FILE_LENGTH seek=0 count=1
+
+    # (1) Edit the middle of an existing file
+    #     modify directly(seek 7.5MB offset)
+    #     In the case of nomultipart and nocopyapi,
+    #     it makes no sense, but copying files is because it leaves no cache.
+    #
+    cp /tmp/${BIG_FILE} /tmp/${BIG_FILE}-mix
+    cp ${BIG_FILE} ${BIG_FILE}-mix
+
+    MODIFY_START_BLOCK=$((15*1024*1024/2/4))
+    echo -n "0123456789ABCDEF" | dd of="${BIG_FILE}-mix" bs=4 count=4 seek=$MODIFY_START_BLOCK conv=notrunc
+    echo -n "0123456789ABCDEF" | dd of="/tmp/${BIG_FILE}-mix" bs=4 count=4 seek=$MODIFY_START_BLOCK conv=notrunc
+
+    # Verify contents of file
+    echo "Comparing test file (1)"
+    if ! cmp "/tmp/${BIG_FILE}-mix" "${BIG_FILE}-mix"
+    then
+       return 1
+    fi
+
+    # (2) Write to an area larger than the size of the existing file
+    #     modify directly(over file end offset)
+    #
+    cp /tmp/${BIG_FILE} /tmp/${BIG_FILE}-mix
+    cp ${BIG_FILE} ${BIG_FILE}-mix
+
+    OVER_FILE_BLOCK_POS=$((26*1024*1024/4))
+    echo -n "0123456789ABCDEF" | dd of="${BIG_FILE}-mix" bs=4 count=4 seek=$OVER_FILE_BLOCK_POS conv=notrunc
+    echo -n "0123456789ABCDEF" | dd of="/tmp/${BIG_FILE}-mix" bs=4 count=4 seek=$OVER_FILE_BLOCK_POS conv=notrunc
+
+    # Verify contents of file
+    echo "Comparing test file (2)"
+    if ! cmp "/tmp/${BIG_FILE}-mix" "${BIG_FILE}-mix"
+    then
+       return 1
+    fi
+
+    # (3) Writing from the 0th byte
+    #
+    cp /tmp/${BIG_FILE} /tmp/${BIG_FILE}-mix
+    cp ${BIG_FILE} ${BIG_FILE}-mix
+
+    echo -n "0123456789ABCDEF" | dd of="${BIG_FILE}-mix" bs=4 count=4 seek=0 conv=notrunc
+    echo -n "0123456789ABCDEF" | dd of="/tmp/${BIG_FILE}-mix" bs=4 count=4 seek=0 conv=notrunc
+
+    # Verify contents of file
+    echo "Comparing test file (3)"
+    if ! cmp "/tmp/${BIG_FILE}-mix" "${BIG_FILE}-mix"
+    then
+       return 1
+    fi
+
+    # (4) Write to the area within 5MB from the top
+    #     modify directly(seek 1MB offset)
+    #
+    cp /tmp/${BIG_FILE} /tmp/${BIG_FILE}-mix
+    cp ${BIG_FILE} ${BIG_FILE}-mix
+
+    MODIFY_START_BLOCK=$((1*1024*1024))
+    echo -n "0123456789ABCDEF" | dd of="${BIG_FILE}-mix" bs=4 count=4 seek=$MODIFY_START_BLOCK conv=notrunc
+    echo -n "0123456789ABCDEF" | dd of="/tmp/${BIG_FILE}-mix" bs=4 count=4 seek=$MODIFY_START_BLOCK conv=notrunc
+
+    # Verify contents of file
+    echo "Comparing test file (4)"
+    if ! cmp "/tmp/${BIG_FILE}-mix" "${BIG_FILE}-mix"
+    then
+       return 1
+    fi
+
+    rm -f "/tmp/${BIG_FILE}"
+    rm -f "/tmp/${BIG_FILE}-mix"
+    rm_test_file "${BIG_FILE}"
+    rm_test_file "${BIG_FILE}-mix"
 }
 
 function test_special_characters {
     describe "Testing special characters ..."
 
-    ls 'special' 2>&1 | grep -q 'No such file or directory'
-    ls 'special?' 2>&1 | grep -q 'No such file or directory'
-    ls 'special*' 2>&1 | grep -q 'No such file or directory'
-    ls 'special~' 2>&1 | grep -q 'No such file or directory'
-    ls 'specialµ' 2>&1 | grep -q 'No such file or directory'
+    (
+        set +o pipefail
+        ls 'special' 2>&1 | grep -q 'No such file or directory'
+        ls 'special?' 2>&1 | grep -q 'No such file or directory'
+        ls 'special*' 2>&1 | grep -q 'No such file or directory'
+        ls 'special~' 2>&1 | grep -q 'No such file or directory'
+        ls 'specialµ' 2>&1 | grep -q 'No such file or directory'
+    )
+
+    mkdir "TOYOTA TRUCK 8.2.2"
 }
 
 function test_symlink {
@@ -376,30 +475,31 @@ function test_symlink {
 
     [ -L $ALT_TEST_TEXT_FILE ]
     [ ! -f $ALT_TEST_TEXT_FILE ]
+
+    rm -f $ALT_TEST_TEXT_FILE
 }
 
 function test_extended_attributes {
-    command -v setfattr >/dev/null 2>&1 || \
-        { echo "Skipping extended attribute tests" ; return; }
-
     describe "Testing extended attributes ..."
 
     rm -f $TEST_TEXT_FILE
     touch $TEST_TEXT_FILE
 
     # set value
-    setfattr -n key1 -v value1 $TEST_TEXT_FILE
-    getfattr -n key1 --only-values $TEST_TEXT_FILE | grep -q '^value1$'
+    set_xattr key1 value1 $TEST_TEXT_FILE
+    get_xattr key1 $TEST_TEXT_FILE | grep -q '^value1$'
 
     # append value
-    setfattr -n key2 -v value2 $TEST_TEXT_FILE
-    getfattr -n key1 --only-values $TEST_TEXT_FILE | grep -q '^value1$'
-    getfattr -n key2 --only-values $TEST_TEXT_FILE | grep -q '^value2$'
+    set_xattr key2 value2 $TEST_TEXT_FILE
+    get_xattr key1 $TEST_TEXT_FILE | grep -q '^value1$'
+    get_xattr key2 $TEST_TEXT_FILE | grep -q '^value2$'
 
     # remove value
-    setfattr -x key1 $TEST_TEXT_FILE
-    ! getfattr -n key1 --only-values $TEST_TEXT_FILE
-    getfattr -n key2 --only-values $TEST_TEXT_FILE | grep -q '^value2$'
+    del_xattr key1 $TEST_TEXT_FILE
+    ! get_xattr key1 $TEST_TEXT_FILE
+    get_xattr key2 $TEST_TEXT_FILE | grep -q '^value2$'
+
+    rm_test_file
 }
 
 function test_mtime_file {
@@ -430,6 +530,9 @@ function test_mtime_file {
        echo "File times do not match:  $testmtime != $altmtime"
        return 1
     fi
+
+    rm_test_file
+    rm_test_file $ALT_TEST_TEXT_FILE
 }
 
 function test_update_time() {
@@ -460,20 +563,14 @@ function test_update_time() {
        return 1
     fi
 
-    if command -v setfattr >/dev/null 2>&1; then
-        sleep 2
-        setfattr -n key -v value $TEST_TEXT_FILE
+    sleep 2
+    set_xattr key value $TEST_TEXT_FILE
 
-        ctime4=`get_ctime $TEST_TEXT_FILE`
-        mtime4=`get_mtime $TEST_TEXT_FILE`
-        if [ $ctime3 -eq $ctime4 -o $mtime3 -ne $mtime4 ]; then
-           echo "Expected updated ctime: $ctime3 != $ctime4 and same mtime: $mtime3 == $mtime4"
-           return 1
-        fi
-    else
-        echo "Skipping extended attribute test"
-        ctime4=`get_ctime $TEST_TEXT_FILE`
-        mtime4=`get_mtime $TEST_TEXT_FILE`
+    ctime4=`get_ctime $TEST_TEXT_FILE`
+    mtime4=`get_mtime $TEST_TEXT_FILE`
+    if [ $ctime3 -eq $ctime4 -o $mtime3 -ne $mtime4 ]; then
+       echo "Expected updated ctime: $ctime3 != $ctime4 and same mtime: $mtime3 == $mtime4"
+       return 1
     fi
 
     sleep 2
@@ -485,6 +582,8 @@ function test_update_time() {
        echo "Expected updated ctime: $ctime4 != $ctime5 and updated mtime: $mtime4 != $mtime5"
        return 1
     fi
+
+    rm_test_file
 }
 
 function test_rm_rf_dir {
@@ -504,10 +603,21 @@ function test_rm_rf_dir {
    fi
 }
 
+function test_copy_file {
+   describe "Test simple copy"
+
+   dd if=/dev/urandom of=/tmp/simple_file bs=1024 count=1
+   cp /tmp/simple_file copied_simple_file
+   cmp /tmp/simple_file copied_simple_file
+
+   rm_test_file /tmp/simple_file
+   rm_test_file copied_simple_file
+}
+
 function test_write_after_seek_ahead {
    describe "Test writes succeed after a seek ahead"
    dd if=/dev/zero of=testfile seek=1 count=1 bs=1024
-   rm testfile
+   rm_test_file testfile
 }
 
 function test_overwrite_existing_file_range {
@@ -519,24 +629,129 @@ function test_overwrite_existing_file_range {
         dd if=/dev/zero count=1 bs=1024
         seq 1000 | tail -c +2049
     )
-    rm -f ${TEST_TEXT_FILE}
+    rm_test_file
 }
 
 function test_concurrency {
-    for i in `seq 10`; do echo foo > $i; done
-    for process in `seq 2`; do
-        for i in `seq 100`; do
-            file=$(ls | sed -n "$(($RANDOM % 10 + 1)){p;q}")
+    describe "Test concurrent updates to a directory"
+    for i in `seq 5`; do echo foo > $i; done
+    for process in `seq 10`; do
+        for i in `seq 5`; do
+            file=$(ls `seq 5` | sed -n "$(($RANDOM % 5 + 1))p")
             cat $file >/dev/null || true
             rm -f $file
-            echo foo > $i || true
+            echo foo > $file || true
         done &
     done
     wait
+    rm -f `seq 5`
 }
 
+function test_concurrent_writes {
+    describe "Test concurrent updates to a file"
+    dd if=/dev/urandom of=${TEST_TEXT_FILE} bs=$BIG_FILE_LENGTH count=1
+    for process in `seq 10`; do
+        dd if=/dev/zero of=${TEST_TEXT_FILE} seek=$(($RANDOM % $BIG_FILE_LENGTH)) count=1 bs=1024 conv=notrunc &
+    done
+    wait
+    rm_test_file
+}
+
+function test_open_second_fd {
+    describe "read from an open fd"
+    rm_test_file second_fd_file
+    RESULT=$( (echo foo ; wc -c < second_fd_file >&2) 2>& 1>second_fd_file)
+    if [ "$RESULT" -ne 4 ]; then
+        echo "size mismatch, expected: 4, was: ${RESULT}"
+        return 1
+    fi
+    rm_test_file second_fd_file
+}
+
+function test_write_multiple_offsets {
+    describe "test writing to multiple offsets"
+    ../../write_multiple_offsets.py ${TEST_TEXT_FILE}
+    rm_test_file ${TEST_TEXT_FILE}
+}
+
+function test_clean_up_cache() {
+    describe "Test clean up cache"
+
+    dir="many_files"
+    count=25
+    mkdir -p $dir
+
+    for x in $(seq $count); do
+        dd if=/dev/urandom of=$dir/file-$x bs=10485760 count=1
+    done
+
+    file_cnt=$(ls $dir | wc -l)
+    if [ $file_cnt != $count ]; then
+        echo "Expected $count files but got $file_cnt"
+        rm -rf $dir
+        return 1
+    fi
+    CACHE_DISK_AVAIL_SIZE=`get_disk_avail_size $CACHE_DIR`
+    if [ "$CACHE_DISK_AVAIL_SIZE" -lt "$ENSURE_DISKFREE_SIZE" ];then
+        echo "Cache disk avail size:$CACHE_DISK_AVAIL_SIZE less than ensure_diskfree size:$ENSURE_DISKFREE_SIZE"
+        rm -rf $dir
+        return 1
+    fi
+    rm -rf $dir
+}
+
+function test_content_type() {
+    describe "Test Content-Type detection"
+
+    DIR_NAME="$(basename $PWD)"
+
+    touch "test.txt"
+    CONTENT_TYPE=$(aws_cli s3api head-object --bucket "${TEST_BUCKET_1}" --key "${DIR_NAME}/test.txt" | grep "ContentType")
+    if [ `uname` = "Darwin" ]; then
+        if ! echo $CONTENT_TYPE | grep -q "application/octet-stream"; then
+            echo "Unexpected Content-Type(MacOS): $CONTENT_TYPE"
+            return 1;
+        fi
+    else
+        if ! echo $CONTENT_TYPE | grep -q "text/plain"; then
+            echo "Unexpected Content-Type: $CONTENT_TYPE"
+            return 1;
+        fi
+    fi
+
+    touch "test.jpg"
+    CONTENT_TYPE=$(aws_cli s3api head-object --bucket "${TEST_BUCKET_1}" --key "${DIR_NAME}/test.jpg" | grep "ContentType")
+    if [ `uname` = "Darwin" ]; then
+        if ! echo $CONTENT_TYPE | grep -q "application/octet-stream"; then
+            echo "Unexpected Content-Type(MacOS): $CONTENT_TYPE"
+            return 1;
+        fi
+    else
+        if ! echo $CONTENT_TYPE | grep -q "image/jpeg"; then
+            echo "Unexpected Content-Type: $CONTENT_TYPE"
+            return 1;
+        fi
+    fi
+
+    touch "test.bin"
+    CONTENT_TYPE=$(aws_cli s3api head-object --bucket "${TEST_BUCKET_1}" --key "${DIR_NAME}/test.bin" | grep "ContentType")
+    if ! echo $CONTENT_TYPE | grep -q "application/octet-stream"; then
+        echo "Unexpected Content-Type: $CONTENT_TYPE"
+        return 1;
+    fi
+
+    mkdir "test.dir"
+    CONTENT_TYPE=$(aws_cli s3api head-object --bucket "${TEST_BUCKET_1}" --key "${DIR_NAME}/test.dir/" | grep "ContentType")
+    if ! echo $CONTENT_TYPE | grep -q "application/x-directory"; then
+        echo "Unexpected Content-Type: $CONTENT_TYPE"
+        return 1;
+    fi
+}
 
 function add_all_tests {
+    if `ps -ef | grep -v grep | grep s3fs | grep -q ensure_diskfree` && ! `uname | grep -q Darwin`; then
+        add_tests test_clean_up_cache
+    fi
     add_tests test_append_file 
     add_tests test_truncate_file 
     add_tests test_truncate_empty_file
@@ -549,18 +764,26 @@ function add_all_tests {
     add_tests test_chown
     add_tests test_list
     add_tests test_remove_nonempty_directory
+    add_tests test_external_modification
+    add_tests test_read_external_object
     add_tests test_rename_before_close
     add_tests test_multipart_upload
     add_tests test_multipart_copy
+    add_tests test_multipart_mix
     add_tests test_special_characters
     add_tests test_symlink
     add_tests test_extended_attributes
     add_tests test_mtime_file
     add_tests test_update_time
     add_tests test_rm_rf_dir
+    add_tests test_copy_file
     add_tests test_write_after_seek_ahead
     add_tests test_overwrite_existing_file_range
     add_tests test_concurrency
+    add_tests test_concurrent_writes
+    add_tests test_open_second_fd
+    add_tests test_write_multiple_offsets
+    add_tests test_content_type
 }
 
 init_suite

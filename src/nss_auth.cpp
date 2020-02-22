@@ -127,9 +127,7 @@ static bool s3fs_HMAC_RAW(const void* key, size_t keylen, const unsigned char* d
   PK11_FreeSymKey(pKey);
   PK11_FreeSlot(Slot);
 
-  if(NULL == (*digest = reinterpret_cast<unsigned char*>(malloc(*digestlen)))){
-    return false;
-  }
+  *digest = new unsigned char[*digestlen];
   memcpy(*digest, tmpdigest, *digestlen);
 
   return true;
@@ -169,17 +167,12 @@ unsigned char* s3fs_md5hexsum(int fd, off_t start, ssize_t size)
     size = static_cast<ssize_t>(st.st_size);
   }
 
-  // seek to top of file.
-  if(-1 == lseek(fd, start, SEEK_SET)){
-    return NULL;
-  }
-
   memset(buf, 0, 512);
   md5ctx = PK11_CreateDigestContext(SEC_OID_MD5);
 
   for(ssize_t total = 0; total < size; total += bytes){
     bytes = 512 < (size - total) ? 512 : (size - total);
-    bytes = read(fd, buf, bytes);
+    bytes = pread(fd, buf, bytes, start + total);
     if(0 == bytes){
       // end of file
       break;
@@ -192,17 +185,9 @@ unsigned char* s3fs_md5hexsum(int fd, off_t start, ssize_t size)
     PK11_DigestOp(md5ctx, buf, bytes);
     memset(buf, 0, 512);
   }
-  if(NULL == (result = reinterpret_cast<unsigned char*>(malloc(get_md5_digest_length())))){
-    PK11_DestroyContext(md5ctx, PR_TRUE);
-    return NULL;
-  }
+  result = new unsigned char[get_md5_digest_length()];
   PK11_DigestFinal(md5ctx, result, &md5outlen, get_md5_digest_length());
   PK11_DestroyContext(md5ctx, PR_TRUE);
-
-  if(-1 == lseek(fd, start, SEEK_SET)){
-    free(result);
-    return NULL;
-  }
 
   return result;
 }
@@ -218,9 +203,7 @@ size_t get_sha256_digest_length()
 bool s3fs_sha256(const unsigned char* data, unsigned int datalen, unsigned char** digest, unsigned int* digestlen)
 {
   (*digestlen) = static_cast<unsigned int>(get_sha256_digest_length());
-  if(NULL == ((*digest) = reinterpret_cast<unsigned char*>(malloc(*digestlen)))){
-    return false;
-  }
+  *digest = new unsigned char[*digestlen];
 
   PK11Context*	 sha256ctx;
   unsigned int   sha256outlen;
@@ -250,17 +233,12 @@ unsigned char* s3fs_sha256hexsum(int fd, off_t start, ssize_t size)
     size = static_cast<ssize_t>(st.st_size);
   }
 
-  // seek to top of file.
-  if(-1 == lseek(fd, start, SEEK_SET)){
-    return NULL;
-  }
-
   memset(buf, 0, 512);
   sha256ctx = PK11_CreateDigestContext(SEC_OID_SHA256);
 
   for(ssize_t total = 0; total < size; total += bytes){
     bytes = 512 < (size - total) ? 512 : (size - total);
-    bytes = read(fd, buf, bytes);
+    bytes = pread(fd, buf, bytes, start + total);
     if(0 == bytes){
       // end of file
       break;
@@ -273,17 +251,9 @@ unsigned char* s3fs_sha256hexsum(int fd, off_t start, ssize_t size)
     PK11_DigestOp(sha256ctx, buf, bytes);
     memset(buf, 0, 512);
   }
-  if(NULL == (result = reinterpret_cast<unsigned char*>(malloc(get_sha256_digest_length())))){
-    PK11_DestroyContext(sha256ctx, PR_TRUE);
-    return NULL;
-  }
+  result = new unsigned char[get_sha256_digest_length()];
   PK11_DigestFinal(sha256ctx, result, &sha256outlen, get_sha256_digest_length());
   PK11_DestroyContext(sha256ctx, PR_TRUE);
-
-  if(-1 == lseek(fd, start, SEEK_SET)){
-    free(result);
-    return NULL;
-  }
 
   return result;
 }
