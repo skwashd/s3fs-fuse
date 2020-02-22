@@ -3,7 +3,7 @@ Upstream-Name: s3fs-fuse
 Source: https://github.com/s3fs-fuse/s3fs-fuse/releases
 
 Files: *
-Copyright: 2007 Randy Rizun <rrizun@gmail.com>
+Copyright: 2007-2008 Randy Rizun <rrizun@gmail.com>
            2014 Andrew Gaul <andrew@gaul.org>
            2007 Takeshi Nakatani <ggtakec@gmail.com>
 License: GPL-2+
