@@ -5,7 +5,7 @@ Maintainer: Andrii Senkovych <andrii@senkovych.com>
 Uploaders:
  Mattia Rizzolo <mattia@debian.org>,
 Build-Depends:
- debhelper-compat (= 12),
+ debhelper-compat (= 13),
  libcurl4-gnutls-dev,
  libfuse-dev,
  libgcrypt20-dev,
