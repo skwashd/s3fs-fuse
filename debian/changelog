@@ -1,3 +1,11 @@
+s3fs-fuse (1.87-1) unstable; urgency=medium
+
+  * New upstream release 1.87.  LP: #1891124
+    https://github.com/s3fs-fuse/s3fs-fuse/releases/tag/v1.87
+  * Bump debhelper compat level to 13.
+
+ -- Mattia Rizzolo <mattia@debian.org>  Tue, 11 Aug 2020 09:38:23 +0200
+
 s3fs-fuse (1.86-1) unstable; urgency=medium
 
   * New upstream release 1.86.  LP: #1862023
