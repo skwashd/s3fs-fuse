@@ -186,7 +186,8 @@ private:
 //----------------------------------------------
 // class S3fsCurl
 //----------------------------------------------
-class PageList;
+#include "fdcache.h"    // for fdpage_list_t
+
 class S3fsCurl;
 
 // Prototype function for lazy setup options for curl handle
@@ -202,7 +203,8 @@ enum storage_class_t {
   STANDARD_IA,
   ONEZONE_IA,
   REDUCED_REDUNDANCY,
-  INTELLIGENT_TIERING
+  INTELLIGENT_TIERING,
+  GLACIER
 };
 
 enum acl_t {
@@ -279,6 +281,7 @@ class S3fsCurl
     static sse_type_t       ssetype;
     static bool             is_content_md5;
     static bool             is_verbose;
+    static bool             is_dump_body;
     static std::string      AWSAccessKeyId;
     static std::string      AWSSecretAccessKey;
     static std::string      AWSAccessToken;
@@ -355,7 +358,6 @@ class S3fsCurl
     static bool DestroyCryptMutex(void);
     static int CurlProgress(void *clientp, double dltotal, double dlnow, double ultotal, double ulnow);
 
-    static bool InitMimeType(const char* MimeFile = NULL);
     static bool LocateBundle(void);
     static size_t HeaderCallback(void *data, size_t blockSize, size_t numBlocks, void *userPtr);
     static size_t WriteMemoryCallback(void *ptr, size_t blockSize, size_t numBlocks, void *data);
@@ -387,6 +389,9 @@ class S3fsCurl
     static bool AddUserAgent(CURL* hCurl);
 
     static int CurlDebugFunc(CURL* hcurl, curl_infotype type, char* data, size_t size, void* userptr);
+    static int CurlDebugBodyInFunc(CURL* hcurl, curl_infotype type, char* data, size_t size, void* userptr);
+    static int CurlDebugBodyOutFunc(CURL* hcurl, curl_infotype type, char* data, size_t size, void* userptr);
+    static int RawCurlDebugFunc(CURL* hcurl, curl_infotype type, char* data, size_t size, void* userptr, curl_infotype datatype);
 
     // methods
     bool ResetHandle(void);
@@ -408,10 +413,11 @@ class S3fsCurl
 
   public:
     // class methods
-    static bool InitS3fsCurl(const char* MimeFile = NULL);
+    static bool InitS3fsCurl(void);
+    static bool InitMimeType(const std::string& strFile);
     static bool DestroyS3fsCurl(void);
     static int ParallelMultipartUploadRequest(const char* tpath, headers_t& meta, int fd);
-    static int ParallelMixMultipartUploadRequest(const char* tpath, headers_t& meta, int fd, const PageList& pagelist);
+    static int ParallelMixMultipartUploadRequest(const char* tpath, headers_t& meta, int fd, const fdpage_list_t& mixuppages);
     static int ParallelGetObjectRequest(const char* tpath, int fd, off_t start, ssize_t size);
     static bool CheckIAMCredentialUpdate(void);
 
@@ -448,6 +454,8 @@ class S3fsCurl
     static bool SetContentMd5(bool flag);
     static bool SetVerbose(bool flag);
     static bool GetVerbose(void) { return S3fsCurl::is_verbose; }
+    static bool SetDumpBody(bool flag);
+    static bool IsDumpBody(void) { return S3fsCurl::is_dump_body; }
     static bool SetAccessKey(const char* AccessKeyId, const char* SecretAccessKey);
     static bool SetAccessKeyWithSessionToken(const char* AccessKeyId, const char* SecretAccessKey, const char * SessionToken);
     static bool IsSetAccessKeyID(void){

@@ -4,11 +4,13 @@ s3fs allows Linux and macOS to mount an S3 bucket via FUSE.
 s3fs preserves the native object format for files, allowing use of other
 tools like [AWS CLI](https://github.com/aws/aws-cli).
 [![Build Status](https://travis-ci.org/s3fs-fuse/s3fs-fuse.svg?branch=master)](https://travis-ci.org/s3fs-fuse/s3fs-fuse)
+[![Twitter Follow](https://img.shields.io/twitter/follow/s3fsfuse.svg?style=social&label=Follow)](https://twitter.com/s3fsfuse)
 
 ## Features
 
 * large subset of POSIX including reading/writing files, directories, symlinks, mode, uid/gid, and extended attributes
 * compatible with Amazon S3, Google Cloud Storage, and other S3-based object stores
+* allows random writes and appends
 * large files via multi-part upload
 * renames via server-side copy
 * optional server-side encryption
@@ -27,6 +29,12 @@ Many systems provide pre-built packages:
   ```
   sudo amazon-linux-extras install epel
   sudo yum install s3fs-fuse
+  ```
+
+* Arch Linux:
+
+  ```
+  sudo pacman -S s3fs-fuse
   ```
 
 * Debian 9 and Ubuntu 16.04 or newer:
@@ -77,8 +85,8 @@ stored in `${HOME}/.aws/credentials`.  Alternatively, s3fs supports a custom pas
 
 The default location for the s3fs password file can be created:
 
-* using a .passwd-s3fs file in the users home directory (i.e. ${HOME}/.passwd-s3fs)
-* using the system-wide /etc/passwd-s3fs file
+* using a `.passwd-s3fs` file in the users home directory (i.e. `${HOME}/.passwd-s3fs`)
+* using the system-wide `/etc/passwd-s3fs` file
 
 Enter your credentials in a file `${HOME}/.passwd-s3fs` and set
 owner-only permissions:
@@ -103,7 +111,7 @@ s3fs mybucket /path/to/mountpoint -o passwd_file=${HOME}/.passwd-s3fs -o dbgleve
 You can also mount on boot by entering the following line to `/etc/fstab`:
 
 ```
-s3fs#mybucket /path/to/mountpoint fuse _netdev,allow_other 0 0
+mybucket /path/to/mountpoint fuse.s3fs _netdev,allow_other 0 0
 ```
 
 or
@@ -121,16 +129,8 @@ s3fs mybucket /path/to/mountpoint -o passwd_file=${HOME}/.passwd-s3fs -o url=htt
 or(fstab)
 
 ```
-s3fs#mybucket /path/to/mountpoint fuse _netdev,allow_other,use_path_request_style,url=https://url.to.s3/ 0 0
+mybucket /path/to/mountpoint fuse.s3fs _netdev,allow_other,use_path_request_style,url=https://url.to.s3/ 0 0
 ```
-
-To use IBM IAM Authentication, use the `-o ibm_iam_auth` option, and specify the Service Instance ID and API Key in your credentials file:
-
-```
-echo SERVICEINSTANCEID:APIKEY > /path/to/passwd
-```
-
-The Service Instance ID is only required when using the `-o create_bucket` option.
 
 Note: You may also want to create the global credential file first
 
@@ -145,7 +145,7 @@ Note2: You may also need to make sure `netfs` service is start on boot
 
 Generally S3 cannot offer the same performance or semantics as a local file system.  More specifically:
 
-* random writes or appends to files require rewriting the entire file
+* random writes or appends to files require rewriting the entire object, optimized with multi-part upload copy
 * metadata operations such as listing directories have poor performance due to network latency
 * [eventual consistency](https://en.wikipedia.org/wiki/Eventual_consistency) can temporarily yield stale data([Amazon S3 Data Consistency Model](https://docs.aws.amazon.com/AmazonS3/latest/dev/Introduction.html#ConsistencyModel))
 * no atomic renames of files or directories

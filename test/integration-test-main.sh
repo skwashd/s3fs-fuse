@@ -33,6 +33,19 @@ function test_truncate_file {
     rm_test_file
 }
 
+function test_truncate_upload {
+    describe "Testing truncate file for uploading ..."
+
+    # This file size uses multipart, mix upload when uploading.
+    # We will test these cases.
+
+    rm_test_file ${BIG_FILE}
+
+    truncate ${BIG_FILE} -s ${BIG_FILE_LENGTH}
+
+    rm_test_file ${BIG_FILE}
+}
+
 function test_truncate_empty_file {
     describe "Testing truncate empty file ..."
     # Write an empty test file
@@ -180,7 +193,7 @@ function test_redirects {
 }
 
 function test_mkdir_rmdir {
-    describe "Testing creation/removal of a directory"
+    describe "Testing creation/removal of a directory ..."
 
     if [ -e $TEST_DIR ]; then
        echo "Unexpected, this file/directory exists: ${TEST_DIR}"
@@ -197,20 +210,12 @@ function test_chmod {
     # create the test file again
     mk_test_file
 
-    if [ `uname` = "Darwin" ]; then
-        ORIGINAL_PERMISSIONS=$(stat -f "%p" $TEST_TEXT_FILE)
-    else
-        ORIGINAL_PERMISSIONS=$(stat --format=%a $TEST_TEXT_FILE)
-    fi
+    ORIGINAL_PERMISSIONS=$(get_permissions $TEST_TEXT_FILE)
 
     chmod 777 $TEST_TEXT_FILE;
 
     # if they're the same, we have a problem.
-    if [ `uname` = "Darwin" ]; then
-        CHANGED_PERMISSIONS=$(stat -f "%p" $TEST_TEXT_FILE)
-    else
-        CHANGED_PERMISSIONS=$(stat --format=%a $TEST_TEXT_FILE)
-    fi
+    CHANGED_PERMISSIONS=$(get_permissions $TEST_TEXT_FILE)
     if [ $CHANGED_PERMISSIONS == $ORIGINAL_PERMISSIONS ]
     then
       echo "Could not modify $TEST_TEXT_FILE permissions"
@@ -264,7 +269,7 @@ function test_chown {
 }
 
 function test_list {
-    describe "Testing list"
+    describe "Testing list ..."
     mk_test_file
     mk_test_dir
 
@@ -279,7 +284,7 @@ function test_list {
 }
 
 function test_remove_nonempty_directory {
-    describe "Testing removing a non-empty directory"
+    describe "Testing removing a non-empty directory ..."
     mk_test_dir
     touch "${TEST_DIR}/file"
     (
@@ -290,8 +295,19 @@ function test_remove_nonempty_directory {
     rm_test_dir
 }
 
+function test_external_directory_creation {
+    describe "Test external directory creation ..."
+    OBJECT_NAME="$(basename $PWD)/directory/${TEST_TEXT_FILE}"
+    echo "data" | aws_cli s3 cp - "s3://${TEST_BUCKET_1}/${OBJECT_NAME}"
+    ls | grep directory
+    get_permissions directory | grep ^750$
+    ls directory
+    cmp <(echo "data") directory/${TEST_TEXT_FILE}
+    rm -f directory/${TEST_TEXT_FILE}
+}
+
 function test_external_modification {
-    describe "Test external modification to an object"
+    describe "Test external modification to an object ..."
     echo "old" > ${TEST_TEXT_FILE}
     OBJECT_NAME="$(basename $PWD)/${TEST_TEXT_FILE}"
     sleep 2
@@ -301,7 +317,7 @@ function test_external_modification {
 }
 
 function test_read_external_object() {
-    describe "create objects via aws CLI and read via s3fs"
+    describe "create objects via aws CLI and read via s3fs ..."
     OBJECT_NAME="$(basename $PWD)/${TEST_TEXT_FILE}"
     sleep 3
     echo "test" | aws_cli s3 cp - "s3://${TEST_BUCKET_1}/${OBJECT_NAME}"
@@ -540,8 +556,8 @@ function test_update_time() {
 
     # create the test
     mk_test_file
-    mtime=`get_ctime $TEST_TEXT_FILE`
-    ctime=`get_mtime $TEST_TEXT_FILE`
+    ctime=`get_ctime $TEST_TEXT_FILE`
+    mtime=`get_mtime $TEST_TEXT_FILE`
 
     sleep 2
     chmod +x $TEST_TEXT_FILE
@@ -554,7 +570,7 @@ function test_update_time() {
     fi
 
     sleep 2
-    chown $UID:$UID $TEST_TEXT_FILE;
+    chown $UID $TEST_TEXT_FILE
 
     ctime3=`get_ctime $TEST_TEXT_FILE`
     mtime3=`get_mtime $TEST_TEXT_FILE`
@@ -587,7 +603,7 @@ function test_update_time() {
 }
 
 function test_rm_rf_dir {
-   describe "Test that rm -rf will remove directory with contents"
+   describe "Test that rm -rf will remove directory with contents ..."
    # Create a dir with some files and directories
    mkdir dir1
    mkdir dir1/dir2
@@ -604,7 +620,7 @@ function test_rm_rf_dir {
 }
 
 function test_copy_file {
-   describe "Test simple copy"
+   describe "Test simple copy ..."
 
    dd if=/dev/urandom of=/tmp/simple_file bs=1024 count=1
    cp /tmp/simple_file copied_simple_file
@@ -615,13 +631,13 @@ function test_copy_file {
 }
 
 function test_write_after_seek_ahead {
-   describe "Test writes succeed after a seek ahead"
+   describe "Test writes succeed after a seek ahead ..."
    dd if=/dev/zero of=testfile seek=1 count=1 bs=1024
    rm_test_file testfile
 }
 
 function test_overwrite_existing_file_range {
-    describe "Test overwrite range succeeds"
+    describe "Test overwrite range succeeds ..."
     dd if=<(seq 1000) of=${TEST_TEXT_FILE}
     dd if=/dev/zero of=${TEST_TEXT_FILE} seek=1 count=1 bs=1024 conv=notrunc
     cmp ${TEST_TEXT_FILE} <(
@@ -633,7 +649,7 @@ function test_overwrite_existing_file_range {
 }
 
 function test_concurrency {
-    describe "Test concurrent updates to a directory"
+    describe "Test concurrent updates to a directory ..."
     for i in `seq 5`; do echo foo > $i; done
     for process in `seq 10`; do
         for i in `seq 5`; do
@@ -648,7 +664,7 @@ function test_concurrency {
 }
 
 function test_concurrent_writes {
-    describe "Test concurrent updates to a file"
+    describe "Test concurrent updates to a file ..."
     dd if=/dev/urandom of=${TEST_TEXT_FILE} bs=$BIG_FILE_LENGTH count=1
     for process in `seq 10`; do
         dd if=/dev/zero of=${TEST_TEXT_FILE} seek=$(($RANDOM % $BIG_FILE_LENGTH)) count=1 bs=1024 conv=notrunc &
@@ -658,7 +674,7 @@ function test_concurrent_writes {
 }
 
 function test_open_second_fd {
-    describe "read from an open fd"
+    describe "read from an open fd ..."
     rm_test_file second_fd_file
     RESULT=$( (echo foo ; wc -c < second_fd_file >&2) 2>& 1>second_fd_file)
     if [ "$RESULT" -ne 4 ]; then
@@ -669,13 +685,19 @@ function test_open_second_fd {
 }
 
 function test_write_multiple_offsets {
-    describe "test writing to multiple offsets"
-    ../../write_multiple_offsets.py ${TEST_TEXT_FILE}
+    describe "test writing to multiple offsets ..."
+    ../../write_multiple_offsets.py ${TEST_TEXT_FILE} 1024 1 $((16 * 1024 * 1024)) 1 $((18 * 1024 * 1024)) 1
+    rm_test_file ${TEST_TEXT_FILE}
+}
+
+function test_write_multiple_offsets_backwards {
+    describe "test writing to multiple offsets ..."
+    ../../write_multiple_offsets.py ${TEST_TEXT_FILE} $((20 * 1024 * 1024 + 1)) 1 $((10 * 1024 * 1024)) 1
     rm_test_file ${TEST_TEXT_FILE}
 }
 
 function test_clean_up_cache() {
-    describe "Test clean up cache"
+    describe "Test clean up cache ..."
 
     dir="many_files"
     count=25
@@ -701,36 +723,22 @@ function test_clean_up_cache() {
 }
 
 function test_content_type() {
-    describe "Test Content-Type detection"
+    describe "Test Content-Type detection ..."
 
     DIR_NAME="$(basename $PWD)"
 
     touch "test.txt"
     CONTENT_TYPE=$(aws_cli s3api head-object --bucket "${TEST_BUCKET_1}" --key "${DIR_NAME}/test.txt" | grep "ContentType")
-    if [ `uname` = "Darwin" ]; then
-        if ! echo $CONTENT_TYPE | grep -q "application/octet-stream"; then
-            echo "Unexpected Content-Type(MacOS): $CONTENT_TYPE"
-            return 1;
-        fi
-    else
-        if ! echo $CONTENT_TYPE | grep -q "text/plain"; then
-            echo "Unexpected Content-Type: $CONTENT_TYPE"
-            return 1;
-        fi
+    if ! echo $CONTENT_TYPE | grep -q "text/plain"; then
+        echo "Unexpected Content-Type: $CONTENT_TYPE"
+        return 1;
     fi
 
     touch "test.jpg"
     CONTENT_TYPE=$(aws_cli s3api head-object --bucket "${TEST_BUCKET_1}" --key "${DIR_NAME}/test.jpg" | grep "ContentType")
-    if [ `uname` = "Darwin" ]; then
-        if ! echo $CONTENT_TYPE | grep -q "application/octet-stream"; then
-            echo "Unexpected Content-Type(MacOS): $CONTENT_TYPE"
-            return 1;
-        fi
-    else
-        if ! echo $CONTENT_TYPE | grep -q "image/jpeg"; then
-            echo "Unexpected Content-Type: $CONTENT_TYPE"
-            return 1;
-        fi
+    if ! echo $CONTENT_TYPE | grep -q "image/jpeg"; then
+        echo "Unexpected Content-Type: $CONTENT_TYPE"
+        return 1;
     fi
 
     touch "test.bin"
@@ -748,12 +756,189 @@ function test_content_type() {
     fi
 }
 
+# create more files than -o max_stat_cache_size
+function test_truncate_cache() {
+    describe "Test make cache files over max cache file size ..."
+
+    for dir in $(seq 2); do
+        mkdir $dir
+        for file in $(seq 75); do
+            touch $dir/$file
+        done
+        ls $dir
+    done
+}
+
+function test_cache_file_stat() {
+    describe "Test cache file stat ..."
+
+    dd if=/dev/urandom of="${BIG_FILE}" bs=${BIG_FILE_LENGTH} count=1
+
+    #
+    # get "testrun-xxx" directory name
+    #
+    CACHE_TESTRUN_DIR=$(ls -1 ${CACHE_DIR}/${TEST_BUCKET_1}/ 2>/dev/null | grep testrun 2>/dev/null)
+
+    #
+    # get cache file inode number
+    #
+    CACHE_FILE_INODE=$(ls -i ${CACHE_DIR}/${TEST_BUCKET_1}/${CACHE_TESTRUN_DIR}/${BIG_FILE} 2>/dev/null | awk '{print $1}')
+    if [ -z ${CACHE_FILE_INODE} ]; then
+        echo "Not found cache file or failed to get inode: ${CACHE_DIR}/${TEST_BUCKET_1}/${CACHE_TESTRUN_DIR}/${BIG_FILE}"
+        return 1;
+    fi
+
+    #
+    # get lines from cache stat file
+    #
+    CACHE_FILE_STAT_LINE_1=$(sed -n 1p ${CACHE_DIR}/.${TEST_BUCKET_1}.stat/${CACHE_TESTRUN_DIR}/${BIG_FILE})
+    CACHE_FILE_STAT_LINE_2=$(sed -n 2p ${CACHE_DIR}/.${TEST_BUCKET_1}.stat/${CACHE_TESTRUN_DIR}/${BIG_FILE})
+    if [ -z ${CACHE_FILE_STAT_LINE_1} ] || [ -z ${CACHE_FILE_STAT_LINE_2} ]; then
+        echo "could not get first or second line from cache file stat: ${CACHE_DIR}/.${TEST_BUCKET_1}.stat/${CACHE_TESTRUN_DIR}/${BIG_FILE}"
+        return 1;
+    fi
+
+    #
+    # compare
+    #
+    if [ "${CACHE_FILE_STAT_LINE_1}" != "${CACHE_FILE_INODE}:${BIG_FILE_LENGTH}" ]; then
+        echo "first line(cache file stat) is different: \"${CACHE_FILE_STAT_LINE_1}\" != \"${CACHE_FILE_INODE}:${BIG_FILE_LENGTH}\""
+        return 1;
+    fi
+    if [ "${CACHE_FILE_STAT_LINE_2}" != "0:${BIG_FILE_LENGTH}:1:0" ]; then
+        echo "last line(cache file stat) is different: \"${CACHE_FILE_STAT_LINE_2}\" != \"0:${BIG_FILE_LENGTH}:1:0\""
+        return 1;
+    fi
+
+    #
+    # remove cache files directly
+    #
+    rm -f ${CACHE_DIR}/${TEST_BUCKET_1}/${CACHE_TESTRUN_DIR}/${BIG_FILE}
+    rm -f ${CACHE_DIR}/.${TEST_BUCKET_1}.stat/${CACHE_TESTRUN_DIR}/${BIG_FILE}
+
+    #
+    # write a byte into the middle(not the boundary) of the file
+    #
+    CHECK_UPLOAD_OFFSET=$((10 * 1024 * 1024 + 17))
+    dd if=/dev/urandom of="${BIG_FILE}" bs=1 count=1 seek=${CHECK_UPLOAD_OFFSET} conv=notrunc
+
+    #
+    # get cache file inode number
+    #
+    CACHE_FILE_INODE=$(ls -i ${CACHE_DIR}/${TEST_BUCKET_1}/${CACHE_TESTRUN_DIR}/${BIG_FILE} 2>/dev/null | awk '{print $1}')
+    if [ -z ${CACHE_FILE_INODE} ]; then
+        echo "Not found cache file or failed to get inode: ${CACHE_DIR}/${TEST_BUCKET_1}/${CACHE_TESTRUN_DIR}/${BIG_FILE}"
+        return 1;
+    fi
+
+    #
+    # get lines from cache stat file
+    #
+    CACHE_FILE_STAT_LINE_1=$(sed -n 1p ${CACHE_DIR}/.${TEST_BUCKET_1}.stat/${CACHE_TESTRUN_DIR}/${BIG_FILE})
+    CACHE_FILE_STAT_LINE_E=$(tail -1 ${CACHE_DIR}/.${TEST_BUCKET_1}.stat/${CACHE_TESTRUN_DIR}/${BIG_FILE} 2>/dev/null)
+    if [ -z ${CACHE_FILE_STAT_LINE_1} ] || [ -z ${CACHE_FILE_STAT_LINE_E} ]; then
+        echo "could not get first or end line from cache file stat: ${CACHE_DIR}/.${TEST_BUCKET_1}.stat/${CACHE_TESTRUN_DIR}/${BIG_FILE}"
+        return 1;
+    fi
+
+    #
+    # check first and cache file length from last line
+    #
+    # we should check all stat lines, but there are cases where the value
+    # differs depending on the processing system etc., then the cache file
+    # size is calculated and compared.
+    #
+    CACHE_LAST_OFFSET=$(echo ${CACHE_FILE_STAT_LINE_E} | cut -d ":" -f1)
+    CACHE_LAST_SIZE=$(echo ${CACHE_FILE_STAT_LINE_E} | cut -d ":" -f2)
+    CACHE_TOTAL_SIZE=$((${CACHE_LAST_OFFSET} + ${CACHE_LAST_SIZE}))
+
+    if [ "${CACHE_FILE_STAT_LINE_1}" != "${CACHE_FILE_INODE}:${BIG_FILE_LENGTH}" ]; then
+        echo "first line(cache file stat) is different: \"${CACHE_FILE_STAT_LINE_1}\" != \"${CACHE_FILE_INODE}:${BIG_FILE_LENGTH}\""
+        return 1;
+    fi
+    if [ ${BIG_FILE_LENGTH} -ne ${CACHE_TOTAL_SIZE} ]; then
+        echo "the file size indicated by the cache stat file is different: \"${BIG_FILE_LENGTH}\" != \"${CACHE_TOTAL_SIZE}\""
+        return 1;
+    fi
+
+    rm_test_file "${BIG_FILE}"
+}
+
+function test_upload_sparsefile {
+    describe "Testing upload sparse file ..."
+
+    rm_test_file ${BIG_FILE}
+    rm -f /tmp/${BIG_FILE}
+
+    #
+    # Make all HOLE file
+    #
+    truncate ${BIG_FILE} -s ${BIG_FILE_LENGTH}
+
+    #
+    # Write some bytes to ABOUT middle in the file
+    # (Dare to remove the block breaks)
+    #
+    WRITE_POS=$((${BIG_FILE_LENGTH} / 2 - 128))
+    echo -n "0123456789ABCDEF" | dd of="/tmp/${BIG_FILE}" bs=1 count=16 seek=${WRITE_POS} conv=notrunc
+
+    #
+    # copy(upload) the file
+    #
+    cp /tmp/${BIG_FILE} ${BIG_FILE}
+
+    #
+    # check
+    #
+    cmp /tmp/${BIG_FILE} ${BIG_FILE}
+
+    rm_test_file ${BIG_FILE}
+    rm -f /tmp/${BIG_FILE}
+}
+
+function test_mix_upload_entities() {
+    describe "Testing upload sparse files ..."
+
+    #
+    # Make test file
+    #
+    dd if=/dev/urandom of=${BIG_FILE} bs=$BIG_FILE_LENGTH count=1
+
+    #
+    # If the cache option is enabled, delete the cache of uploaded files.
+    #
+    if [ -f ${CACHE_DIR}/${TEST_BUCKET_1}/${BIG_FILE} ]; then
+        rm -f ${CACHE_DIR}/${TEST_BUCKET_1}/${BIG_FILE}
+    fi
+    if [ -f ${CACHE_DIR}/.${TEST_BUCKET_1}.stat/${BIG_FILE} ]; then
+        rm -f ${CACHE_DIR}/.${TEST_BUCKET_1}.stat/${BIG_FILE}
+    fi
+
+    #
+    # Do a partial write to the file.
+    #
+    echo -n "0123456789ABCDEF" | dd of=${BIG_FILE} bs=1 count=16 seek=0 conv=notrunc
+    echo -n "0123456789ABCDEF" | dd of=${BIG_FILE} bs=1 count=16 seek=8192 conv=notrunc
+    echo -n "0123456789ABCDEF" | dd of=${BIG_FILE} bs=1 count=16 seek=1073152 conv=notrunc
+    echo -n "0123456789ABCDEF" | dd of=${BIG_FILE} bs=1 count=16 seek=26214400 conv=notrunc
+    echo -n "0123456789ABCDEF" | dd of=${BIG_FILE} bs=1 count=16 seek=26222592 conv=notrunc
+
+    rm_test_file "${BIG_FILE}"
+}
+
+function test_ut_ossfs {
+    describe "Testing ossfs python ut..."
+    export TEST_BUCKET_MOUNT_POINT=$TEST_BUCKET_MOUNT_POINT_1
+    ../../ut_test.py
+}
+
 function add_all_tests {
-    if `ps -ef | grep -v grep | grep s3fs | grep -q ensure_diskfree` && ! `uname | grep -q Darwin`; then
+    if ! ps u $S3FS_PID | grep -q ensure_diskfree && ! uname | grep -q Darwin; then
         add_tests test_clean_up_cache
     fi
-    add_tests test_append_file 
-    add_tests test_truncate_file 
+    add_tests test_append_file
+    add_tests test_truncate_file
+    add_tests test_truncate_upload
     add_tests test_truncate_empty_file
     add_tests test_mv_file
     add_tests test_mv_empty_directory
@@ -764,6 +949,10 @@ function add_all_tests {
     add_tests test_chown
     add_tests test_list
     add_tests test_remove_nonempty_directory
+    if ! ps u $S3FS_PID | grep -q notsup_compat_dir; then
+        # TODO: investigate why notsup_compat_dir fails
+        add_tests test_external_directory_creation
+    fi
     add_tests test_external_modification
     add_tests test_read_external_object
     add_tests test_rename_before_close
@@ -783,7 +972,15 @@ function add_all_tests {
     add_tests test_concurrent_writes
     add_tests test_open_second_fd
     add_tests test_write_multiple_offsets
+    add_tests test_write_multiple_offsets_backwards
     add_tests test_content_type
+    add_tests test_truncate_cache
+    add_tests test_upload_sparsefile
+    add_tests test_mix_upload_entities
+    add_tests test_ut_ossfs
+    if `ps -ef | grep -v grep | grep s3fs | grep -q use_cache`; then
+        add_tests test_cache_file_stat
+    fi
 }
 
 init_suite

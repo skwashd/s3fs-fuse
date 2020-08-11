@@ -52,6 +52,7 @@
 #include "fdcache.h"
 #include "s3fs_auth.h"
 #include "addhead.h"
+#include "sighandlers.h"
 
 using namespace std;
 
@@ -110,8 +111,6 @@ std::string bucket;
 std::string endpoint              = "us-east-1";
 std::string cipher_suites;
 std::string instance_name;
-s3fs_log_level debug_level        = S3FS_LOG_CRIT;
-const char*    s3fs_log_nest[S3FS_LOG_NEST_MAX] = {"", "  ", "    ", "      "};
 std::string aws_profile           = "default";
 
 //-------------------------------------------------------------------
@@ -124,6 +123,7 @@ static mode_t mp_umask            = 0;    // umask for mount point
 static bool is_mp_umask           = false;// default does not set.
 static std::string mountpoint;
 static std::string passwd_file;
+static std::string mimetype_file;
 static utility_incomp_type utility_mode = NO_UTILITY_MODE;
 static bool noxmlns               = false;
 static bool nocopyapi             = false;
@@ -158,10 +158,6 @@ static const std::string aws_secretkey         = "AWSSecretKey";
 //-------------------------------------------------------------------
 // Static functions : prototype
 //-------------------------------------------------------------------
-static void s3fs_usr2_handler(int sig);
-static bool set_s3fs_usr2_handler();
-static s3fs_log_level set_s3fs_log_level(s3fs_log_level level);
-static s3fs_log_level bumpup_s3fs_log_level();
 static bool is_special_name_folder_object(const char* path);
 static int chk_dir_object_type(const char* path, string& newpath, string& nowpath, string& nowcache, headers_t* pmeta = NULL, dirtype* pDirType = NULL);
 static int remove_old_type_dir(const string& path, dirtype type);
@@ -267,50 +263,6 @@ static int s3fs_removexattr(const char* path, const char* name);
 //-------------------------------------------------------------------
 // Functions
 //-------------------------------------------------------------------
-static void s3fs_usr2_handler(int sig)
-{
-  if(SIGUSR2 == sig){
-    bumpup_s3fs_log_level();
-  }
-}
-static bool set_s3fs_usr2_handler()
-{
-  struct sigaction sa;
-
-  memset(&sa, 0, sizeof(struct sigaction));
-  sa.sa_handler = s3fs_usr2_handler;
-  sa.sa_flags   = SA_RESTART;
-  if(0 != sigaction(SIGUSR2, &sa, NULL)){
-    return false;
-  }
-  return true;
-}
-
-static s3fs_log_level set_s3fs_log_level(s3fs_log_level level)
-{
-  if(level == debug_level){
-    return debug_level;
-  }
-  s3fs_log_level old = debug_level;
-  debug_level        = level;
-  setlogmask(LOG_UPTO(S3FS_LOG_LEVEL_TO_SYSLOG(debug_level)));
-  S3FS_PRN_CRIT("change debug level from %sto %s", S3FS_LOG_LEVEL_STRING(old), S3FS_LOG_LEVEL_STRING(debug_level));
-  return old;
-}
-
-static s3fs_log_level bumpup_s3fs_log_level()
-{
-  s3fs_log_level old = debug_level;
-  debug_level        = ( S3FS_LOG_CRIT == debug_level ? S3FS_LOG_ERR :
-                         S3FS_LOG_ERR  == debug_level ? S3FS_LOG_WARN :
-                         S3FS_LOG_WARN == debug_level ? S3FS_LOG_INFO :
-                         S3FS_LOG_INFO == debug_level ? S3FS_LOG_DBG :
-                         S3FS_LOG_CRIT );
-  setlogmask(LOG_UPTO(S3FS_LOG_LEVEL_TO_SYSLOG(debug_level)));
-  S3FS_PRN_CRIT("change debug level from %sto %s", S3FS_LOG_LEVEL_STRING(old), S3FS_LOG_LEVEL_STRING(debug_level));
-  return old;
-}
-
 static bool is_special_name_folder_object(const char* path)
 {
   if(!support_compat_dir){
@@ -1332,8 +1284,11 @@ static int rename_object(const char* from, const char* to)
 
   FdManager::get()->Rename(from, to);
 
+  // Remove file
   result = s3fs_unlink(from);
+
   StatCache::getStatCacheData()->DelStat(to);
+  FdManager::DeleteCacheFile(to);
 
   return result;
 }
@@ -1372,6 +1327,8 @@ static int rename_object_nocopy(const char* from, const char* to)
     FdManager::get()->Close(ent);
     return result;
   }
+
+  FdManager::get()->Rename(from, to);
   FdManager::get()->Close(ent);
 
   // Remove file
@@ -1379,7 +1336,7 @@ static int rename_object_nocopy(const char* from, const char* to)
 
   // Stats
   StatCache::getStatCacheData()->DelStat(to);
-  StatCache::getStatCacheData()->DelStat(from);
+  FdManager::DeleteCacheFile(to);
 
   return result;
 }
@@ -1409,9 +1366,14 @@ static int rename_large_object(const char* from, const char* to)
     return result;
   }
   s3fscurl.DestroyCurlHandle();
-  StatCache::getStatCacheData()->DelStat(to);
 
-  return s3fs_unlink(from);
+  // Remove file
+  result = s3fs_unlink(from);
+
+  StatCache::getStatCacheData()->DelStat(to);
+  FdManager::DeleteCacheFile(to);
+
+  return result;
 }
 
 static int clone_directory_object(const char* from, const char* to)
@@ -3538,12 +3500,22 @@ static void* s3fs_init(struct fuse_conn_info* conn)
      conn->want |= FUSE_CAP_BIG_WRITES;
   }
 
+  // Signal object
+  if(S3fsSignals::Initialize()){
+    S3FS_PRN_ERR("Failed to initialize signal object, but continue...");
+  }
+
   return NULL;
 }
 
 static void s3fs_destroy(void*)
 {
   S3FS_PRN_INFO("destroy");
+
+  // Signal object
+  if(S3fsSignals::Destroy()){
+    S3FS_PRN_WARN("Failed to clean up signal object.");
+  }
 
   // cache(remove at last)
   if(is_remove_cache && (!CacheFileStat::DeleteCacheFileStatDirectory() || !FdManager::DeleteCacheDirectory())){
@@ -4535,7 +4507,7 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
       return 1; // continue for fuse option
     }
     if(0 == STR2NCMP(arg, "umask=")){
-      s3fs_umask = s3fs_strtoofft(strchr(arg, '=') + sizeof(char), /*base=*/ 8);
+      s3fs_umask = cvt_strtoofft(strchr(arg, '=') + sizeof(char), /*base=*/ 8);
       s3fs_umask &= (S_IRWXU | S_IRWXG | S_IRWXO);
       is_s3fs_umask = true;
       return 1; // continue for fuse option
@@ -4545,7 +4517,7 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
       return 1; // continue for fuse option
     }
     if(0 == STR2NCMP(arg, "mp_umask=")){
-      mp_umask = s3fs_strtoofft(strchr(arg, '=') + sizeof(char), /*base=*/ 8);
+      mp_umask = cvt_strtoofft(strchr(arg, '=') + sizeof(char), /*base=*/ 8);
       mp_umask &= (S_IRWXU | S_IRWXG | S_IRWXO);
       is_mp_umask = true;
       return 0;
@@ -4561,7 +4533,12 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
       return 0;
     }
     if(0 == STR2NCMP(arg, "retries=")){
-      S3fsCurl::SetRetries(static_cast<int>(s3fs_strtoofft(strchr(arg, '=') + sizeof(char))));
+      off_t retries = static_cast<int>(cvt_strtoofft(strchr(arg, '=') + sizeof(char)));
+      if(retries == 0){
+        S3FS_PRN_EXIT("retries must be greater than zero");
+        return -1;
+      }
+      S3fsCurl::SetRetries(retries);
       return 0;
     }
     if(0 == STR2NCMP(arg, "use_cache=")){
@@ -4577,7 +4554,7 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
       return 0;
     }
     if(0 == STR2NCMP(arg, "multireq_max=")){
-      int maxreq = static_cast<int>(s3fs_strtoofft(strchr(arg, '=') + sizeof(char)));
+      int maxreq = static_cast<int>(cvt_strtoofft(strchr(arg, '=') + sizeof(char)));
       S3fsCurl::SetMaxMultiRequest(maxreq);
       return 0;
     }
@@ -4594,7 +4571,7 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
       off_t rrs = 1;
       // for an old format.
       if(0 == STR2NCMP(arg, "use_rrs=")){
-        rrs = s3fs_strtoofft(strchr(arg, '=') + sizeof(char));
+        rrs = cvt_strtoofft(strchr(arg, '=') + sizeof(char));
       }
       if(0 == rrs){
         S3fsCurl::SetStorageClass(STANDARD);
@@ -4618,6 +4595,8 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
         S3fsCurl::SetStorageClass(REDUCED_REDUNDANCY);
       }else if(0 == strcmp(storage_class, "intelligent_tiering")){
         S3fsCurl::SetStorageClass(INTELLIGENT_TIERING);
+      }else if(0 == strcmp(storage_class, "glacier")){
+          S3fsCurl::SetStorageClass(GLACIER);
       }else{
         S3FS_PRN_EXIT("unknown value for storage_class: %s", storage_class);
         return -1;
@@ -4734,7 +4713,7 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
       return 0;
     }
     if(0 == STR2NCMP(arg, "ssl_verify_hostname=")){
-      long sslvh = static_cast<long>(s3fs_strtoofft(strchr(arg, '=') + sizeof(char)));
+      long sslvh = static_cast<long>(cvt_strtoofft(strchr(arg, '=') + sizeof(char)));
       if(-1 == S3fsCurl::SetSslVerifyHostname(sslvh)){
         S3FS_PRN_EXIT("poorly formed argument to option: ssl_verify_hostname.");
         return -1;
@@ -4803,7 +4782,7 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
       return 0;
     }
     if(0 == STR2NCMP(arg, "public_bucket=")){
-      off_t pubbucket = s3fs_strtoofft(strchr(arg, '=') + sizeof(char));
+      off_t pubbucket = cvt_strtoofft(strchr(arg, '=') + sizeof(char));
       if(1 == pubbucket){
         S3fsCurl::SetPublicBucket(true);
         // [NOTE]
@@ -4831,17 +4810,17 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
         return 0;
     }
     if(0 == STR2NCMP(arg, "connect_timeout=")){
-      long contimeout = static_cast<long>(s3fs_strtoofft(strchr(arg, '=') + sizeof(char)));
+      long contimeout = static_cast<long>(cvt_strtoofft(strchr(arg, '=') + sizeof(char)));
       S3fsCurl::SetConnectTimeout(contimeout);
       return 0;
     }
     if(0 == STR2NCMP(arg, "readwrite_timeout=")){
-      time_t rwtimeout = static_cast<time_t>(s3fs_strtoofft(strchr(arg, '=') + sizeof(char)));
+      time_t rwtimeout = static_cast<time_t>(cvt_strtoofft(strchr(arg, '=') + sizeof(char)));
       S3fsCurl::SetReadwriteTimeout(rwtimeout);
       return 0;
     }
     if(0 == STR2NCMP(arg, "list_object_max_keys=")){
-      int max_keys = static_cast<int>(s3fs_strtoofft(strchr(arg, '=') + sizeof(char)));
+      int max_keys = static_cast<int>(cvt_strtoofft(strchr(arg, '=') + sizeof(char)));
       if(max_keys < 1000){
         S3FS_PRN_EXIT("argument should be over 1000: list_object_max_keys");
         return -1;
@@ -4850,19 +4829,19 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
       return 0;
     }
     if(0 == STR2NCMP(arg, "max_stat_cache_size=")){
-      unsigned long cache_size = static_cast<unsigned long>(s3fs_strtoofft(strchr(arg, '=') + sizeof(char)));
+      unsigned long cache_size = static_cast<unsigned long>(cvt_strtoofft(strchr(arg, '=') + sizeof(char)));
       StatCache::getStatCacheData()->SetCacheSize(cache_size);
       return 0;
     }
     if(0 == STR2NCMP(arg, "stat_cache_expire=")){
-      time_t expr_time = static_cast<time_t>(s3fs_strtoofft(strchr(arg, '=') + sizeof(char)));
+      time_t expr_time = static_cast<time_t>(cvt_strtoofft(strchr(arg, '=') + sizeof(char)));
       StatCache::getStatCacheData()->SetExpireTime(expr_time);
       return 0;
     }
     // [NOTE]
     // This option is for compatibility old version.
     if(0 == STR2NCMP(arg, "stat_cache_interval_expire=")){
-      time_t expr_time = static_cast<time_t>(s3fs_strtoofft(strchr(arg, '=') + sizeof(char)));
+      time_t expr_time = static_cast<time_t>(cvt_strtoofft(strchr(arg, '=') + sizeof(char)));
       StatCache::getStatCacheData()->SetExpireTime(expr_time, true);
       return 0;
     }
@@ -4879,7 +4858,7 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
       return 0;
     }
     if(0 == STR2NCMP(arg, "parallel_count=") || 0 == STR2NCMP(arg, "parallel_upload=")){
-      int maxpara = static_cast<int>(s3fs_strtoofft(strchr(arg, '=') + sizeof(char)));
+      int maxpara = static_cast<int>(cvt_strtoofft(strchr(arg, '=') + sizeof(char)));
       if(0 >= maxpara){
         S3FS_PRN_EXIT("argument should be over 1: parallel_count");
         return -1;
@@ -4892,7 +4871,7 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
       return 0;
     }
     if(0 == STR2NCMP(arg, "multipart_size=")){
-      off_t size = static_cast<off_t>(s3fs_strtoofft(strchr(arg, '=') + sizeof(char)));
+      off_t size = static_cast<off_t>(cvt_strtoofft(strchr(arg, '=') + sizeof(char)));
       if(!S3fsCurl::SetMultipartSize(size)){
         S3FS_PRN_EXIT("multipart_size option must be at least 5 MB.");
         return -1;
@@ -4900,7 +4879,7 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
       return 0;
     }
     if(0 == STR2NCMP(arg, "ensure_diskfree=")){
-      off_t dfsize = s3fs_strtoofft(strchr(arg, '=') + sizeof(char)) * 1024 * 1024;
+      off_t dfsize = cvt_strtoofft(strchr(arg, '=') + sizeof(char)) * 1024 * 1024;
       if(dfsize < S3fsCurl::GetMultipartSize()){
         S3FS_PRN_WARN("specified size to ensure disk free space is smaller than multipart size, so set multipart size to it.");
         dfsize = S3fsCurl::GetMultipartSize();
@@ -4909,7 +4888,7 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
       return 0;
     }
     if(0 == STR2NCMP(arg, "singlepart_copy_limit=")){
-      singlepart_copy_limit = static_cast<int64_t>(s3fs_strtoofft(strchr(arg, '=') + sizeof(char))) * 1024;
+      singlepart_copy_limit = static_cast<int64_t>(cvt_strtoofft(strchr(arg, '=') + sizeof(char))) * 1024;
       return 0;
     }
     if(0 == STR2NCMP(arg, "ahbe_conf=")){
@@ -5021,21 +5000,25 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
       instance_name = "[" + instance_name + "]";
       return 0;
     }
+    if(0 == STR2NCMP(arg, "mime=")){
+      mimetype_file = strchr(arg, '=') + sizeof(char);
+      return 0;
+    }
     //
     // debug option for s3fs
     //
     if(0 == STR2NCMP(arg, "dbglevel=")){
       const char* strlevel = strchr(arg, '=') + sizeof(char);
       if(0 == strcasecmp(strlevel, "silent") || 0 == strcasecmp(strlevel, "critical") || 0 == strcasecmp(strlevel, "crit")){
-        set_s3fs_log_level(S3FS_LOG_CRIT);
+        S3fsSignals::SetLogLevel(S3FS_LOG_CRIT);
       }else if(0 == strcasecmp(strlevel, "error") || 0 == strcasecmp(strlevel, "err")){
-        set_s3fs_log_level(S3FS_LOG_ERR);
+        S3fsSignals::SetLogLevel(S3FS_LOG_ERR);
       }else if(0 == strcasecmp(strlevel, "wan") || 0 == strcasecmp(strlevel, "warn") || 0 == strcasecmp(strlevel, "warning")){
-        set_s3fs_log_level(S3FS_LOG_WARN);
+        S3fsSignals::SetLogLevel(S3FS_LOG_WARN);
       }else if(0 == strcasecmp(strlevel, "inf") || 0 == strcasecmp(strlevel, "info") || 0 == strcasecmp(strlevel, "information")){
-        set_s3fs_log_level(S3FS_LOG_INFO);
+        S3fsSignals::SetLogLevel(S3FS_LOG_INFO);
       }else if(0 == strcasecmp(strlevel, "dbg") || 0 == strcasecmp(strlevel, "debug")){
-        set_s3fs_log_level(S3FS_LOG_DBG);
+        S3fsSignals::SetLogLevel(S3FS_LOG_DBG);
       }else{
         S3FS_PRN_EXIT("option dbglevel has unknown parameter(%s).", strlevel);
         return -1;
@@ -5049,7 +5032,7 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
     //
     if(0 == strcmp(arg, "-d") || 0 == strcmp(arg, "--debug")){
       if(!IS_S3FS_LOG_INFO() && !IS_S3FS_LOG_DBG()){
-        set_s3fs_log_level(S3FS_LOG_INFO);
+        S3fsSignals::SetLogLevel(S3FS_LOG_INFO);
         return 0;
       }
       if(0 == strcmp(arg, "--debug")){
@@ -5061,11 +5044,40 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
     // "f2" is not used no more.
     // (set S3FS_LOG_DBG)
     if(0 == strcmp(arg, "f2")){
-      set_s3fs_log_level(S3FS_LOG_DBG);
+      S3fsSignals::SetLogLevel(S3FS_LOG_DBG);
       return 0;
     }
     if(0 == strcmp(arg, "curldbg")){
       S3fsCurl::SetVerbose(true);
+      return 0;
+    }else if(0 == STR2NCMP(arg, "curldbg=")){
+      const char* strlevel = strchr(arg, '=') + sizeof(char);
+      if(0 == strcasecmp(strlevel, "normal")){
+        S3fsCurl::SetVerbose(true);
+      }else if(0 == strcasecmp(strlevel, "body")){
+        S3fsCurl::SetVerbose(true);
+        S3fsCurl::SetDumpBody(true);
+      }else{
+        S3FS_PRN_EXIT("option curldbg has unknown parameter(%s).", strlevel);
+        return -1;
+      }
+      return 0;
+    }
+    //
+    // Check cache file, using SIGUSR1
+    //
+    if(0 == strcmp(arg, "set_check_cache_sigusr1")){
+      if(!S3fsSignals::SetUsr1Handler(NULL)){
+        S3FS_PRN_EXIT("could not set sigusr1 for checking cache.");
+        return -1;
+      }
+      return 0;
+    }else if(0 == STR2NCMP(arg, "set_check_cache_sigusr1=")){
+      const char* strfilepath = strchr(arg, '=') + sizeof(char);
+      if(!S3fsSignals::SetUsr1Handler(strfilepath)){
+        S3FS_PRN_EXIT("could not set sigusr1 for checking cache and output file(%s).", strfilepath);
+        return -1;
+      }
       return 0;
     }
 
@@ -5122,7 +5134,7 @@ int main(int argc, char* argv[])
 
   // init syslog(default CRIT)
   openlog("s3fs", LOG_PID | LOG_ODELAY | LOG_NOWAIT, LOG_USER);
-  set_s3fs_log_level(debug_level);
+  S3fsSignals::SetLogLevel(debug_level);
 
   // init xml2
   xmlInitParser();
@@ -5199,8 +5211,23 @@ int main(int argc, char* argv[])
     exit(EXIT_FAILURE);
   }
 
-  // init curl
-  if(!S3fsCurl::InitS3fsCurl("/etc/mime.types")){
+  // init curl (without mime types)
+  //
+  // [NOTE]
+  // The curl initialization here does not load mime types.
+  // The mime types file parameter are dynamic values according
+  // to the user's environment, and are analyzed by the my_fuse_opt_proc
+  // function.
+  // The my_fuse_opt_proc function is executed after this curl
+  // initialization. Because the curl method is used in the
+  // my_fuse_opt_proc function, then it must be called here to
+  // initialize. Fortunately, the processing using mime types
+  // is only PUT/POST processing, and it is not used until the
+  // call of my_fuse_opt_proc function is completed. Therefore,
+  // the mime type is loaded just after calling the my_fuse_opt_proc
+  // function.
+  // 
+  if(!S3fsCurl::InitS3fsCurl()){
     S3FS_PRN_EXIT("Could not initiate curl library.");
     s3fs_destroy_global_ssl();
     exit(EXIT_FAILURE);
@@ -5217,6 +5244,11 @@ int main(int argc, char* argv[])
     S3fsCurl::DestroyS3fsCurl();
     s3fs_destroy_global_ssl();
     exit(EXIT_FAILURE);
+  }
+
+  // init mime types for curl
+  if(!S3fsCurl::InitMimeType(mimetype_file)){
+    S3FS_PRN_WARN("Missing MIME types prevents setting Content-Type on uploaded objects.");
   }
 
   // [NOTE]
@@ -5427,14 +5459,6 @@ int main(int argc, char* argv[])
     s3fs_oper.getxattr    = s3fs_getxattr;
     s3fs_oper.listxattr   = s3fs_listxattr;
     s3fs_oper.removexattr = s3fs_removexattr;
-  }
-
-  // set signal handler for debugging
-  if(!set_s3fs_usr2_handler()){
-    S3FS_PRN_EXIT("could not set signal handler for SIGUSR2.");
-    S3fsCurl::DestroyS3fsCurl();
-    s3fs_destroy_global_ssl();
-    exit(EXIT_FAILURE);
   }
 
   // now passing things off to fuse, fuse will finish evaluating the command line args

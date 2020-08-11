@@ -160,7 +160,7 @@ pthread_mutex_t StatCache::stat_cache_lock;
 //-------------------------------------------------------------------
 // Constructor/Destructor
 //-------------------------------------------------------------------
-StatCache::StatCache() : IsExpireTime(false), IsExpireIntervalType(false), ExpireTime(0), CacheSize(100000), IsCacheNoObject(false)
+StatCache::StatCache() : IsExpireTime(false), IsExpireIntervalType(false), ExpireTime(15 * 60), CacheSize(100000), IsCacheNoObject(false)
 {
   if(this == StatCache::getStatCacheData()){
     stat_cache.clear();
@@ -169,7 +169,11 @@ StatCache::StatCache() : IsExpireTime(false), IsExpireIntervalType(false), Expir
 #if S3FS_PTHREAD_ERRORCHECK
     pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK);
 #endif
-    pthread_mutex_init(&StatCache::stat_cache_lock, &attr);
+    int res;
+    if(0 != (res = pthread_mutex_init(&StatCache::stat_cache_lock, &attr))){
+      S3FS_PRN_CRIT("failed to init stat_cache_lock: %d", res);
+      abort();
+    }
   }else{
     abort();
   }
@@ -179,7 +183,11 @@ StatCache::~StatCache()
 {
   if(this == StatCache::getStatCacheData()){
     Clear();
-    pthread_mutex_destroy(&StatCache::stat_cache_lock);
+    int res = pthread_mutex_destroy(&StatCache::stat_cache_lock);
+    if(res != 0){
+      S3FS_PRN_CRIT("failed to destroy stat_cache_lock: %d", res);
+      abort();
+    }
   }else{
     abort();
   }
@@ -543,20 +551,23 @@ bool StatCache::TruncateCache()
   // 3) erase from the old cache in order
   size_t            erase_count= stat_cache.size() - CacheSize + 1;
   statiterlist_t    erase_iters;
-  for(stat_cache_t::iterator iter = stat_cache.begin(); iter != stat_cache.end(); ++iter){
+  for(stat_cache_t::iterator iter = stat_cache.begin(); iter != stat_cache.end() && 0 < erase_count; ++iter){
     // check no truncate
     stat_cache_entry* ent = iter->second;
     if(ent && 0L < ent->notruncate){
-      // skip for no truncate entry
+      // skip for no truncate entry and keep extra counts for this entity.
       if(0 < erase_count){
         --erase_count;     // decrement
       }
+    }else{
+      // iter is not have notruncate flag
+      erase_iters.push_back(iter);
     }
-    // iter is not have notruncate flag
-    erase_iters.push_back(iter);
-    sort(erase_iters.begin(), erase_iters.end(), sort_statiterlist());
     if(erase_count < erase_iters.size()){
-      erase_iters.pop_back();
+      sort(erase_iters.begin(), erase_iters.end(), sort_statiterlist());
+      while(erase_count < erase_iters.size()){
+        erase_iters.pop_back();
+      }
     }
   }
   for(statiterlist_t::iterator iiter = erase_iters.begin(); iiter != erase_iters.end(); ++iiter){
@@ -607,7 +618,7 @@ bool StatCache::DelStat(const char* key, bool lock_already_held)
 bool StatCache::GetSymlink(const string& key, string& value)
 {
   bool is_delete_cache = false;
-  string strpath = key;
+  const string& strpath = key;
 
   AutoLock lock(&StatCache::stat_cache_lock);
 

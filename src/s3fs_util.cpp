@@ -30,6 +30,7 @@
 #include <syslog.h>
 #include <pthread.h>
 #include <sys/types.h>
+#include <sys/utsname.h>
 #include <dirent.h>
 #include <libxml/xpath.h>
 #include <libxml/xpathInternals.h>
@@ -458,7 +459,11 @@ bool AutoLock::isLockAcquired() const
 AutoLock::~AutoLock()
 {
   if (is_lock_acquired) {
-    pthread_mutex_unlock(auto_mutex);
+    int res = pthread_mutex_unlock(auto_mutex);
+    if(res != 0){
+      S3FS_PRN_CRIT("pthread_mutex_lock returned: %d", res);
+      abort();
+    }
   }
 }
 
@@ -745,6 +750,36 @@ bool delete_files_in_dir(const char* dir, bool is_remove_own)
 }
 
 //-------------------------------------------------------------------
+// Utility for system information
+//-------------------------------------------------------------------
+bool compare_sysname(const char* target)
+{
+  // [NOTE]
+  // The buffer size of sysname member in struct utsname is
+  // OS dependent, but 512 bytes is sufficient for now.
+  //
+  static char* psysname = NULL;
+  static char  sysname[512];
+  if(!psysname){
+    struct utsname sysinfo;
+    if(0 != uname(&sysinfo)){
+      S3FS_PRN_ERR("could not initialize system name to internal buffer(errno:%d), thus use \"Linux\".", errno);
+      strcpy(sysname, "Linux");
+    }else{
+      S3FS_PRN_INFO("system name is %s", sysinfo.sysname);
+      sysname[sizeof(sysname) - 1] = '\0';
+      strncpy(sysname, sysinfo.sysname, sizeof(sysname) - 1);
+    }
+    psysname = &sysname[0];
+  }
+
+  if(!target || 0 != strcmp(psysname, target)){
+    return false;
+  }
+  return true;
+}
+
+//-------------------------------------------------------------------
 // Utility functions for convert
 //-------------------------------------------------------------------
 time_t get_mtime(const char *str)
@@ -763,16 +798,13 @@ time_t get_mtime(const char *str)
       strmtime = strmtime.substr(0, pos);
     }
   }
-  return static_cast<time_t>(s3fs_strtoofft(strmtime.c_str()));
+  return static_cast<time_t>(cvt_strtoofft(strmtime.c_str()));
 }
 
-static time_t get_time(headers_t& meta, bool overcheck, const char *header)
+static time_t get_time(headers_t& meta, const char *header)
 {
   headers_t::const_iterator iter;
   if(meta.end() == (iter = meta.find(header))){
-    if(overcheck){
-      return get_lastmodified(meta);
-    }
     return 0;
   }
   return get_mtime((*iter).second.c_str());
@@ -780,17 +812,35 @@ static time_t get_time(headers_t& meta, bool overcheck, const char *header)
 
 time_t get_mtime(headers_t& meta, bool overcheck)
 {
-  return get_time(meta, overcheck, "x-amz-meta-mtime");
+  time_t t = get_time(meta, "x-amz-meta-mtime");
+  if(t != 0){
+    return t;
+  }
+  t = get_time(meta, "x-amz-meta-goog-reserved-file-mtime");
+  if(t != 0){
+    return t;
+  }
+  if(overcheck){
+    return get_lastmodified(meta);
+  }
+  return 0;
 }
 
 time_t get_ctime(headers_t& meta, bool overcheck)
 {
-  return get_time(meta, overcheck, "x-amz-meta-ctime");
+  time_t t = get_time(meta, "x-amz-meta-ctime");
+  if(t != 0){
+    return t;
+  }
+  if(overcheck){
+    return get_lastmodified(meta);
+  }
+  return 0;
 }
 
 off_t get_size(const char *s)
 {
-  return s3fs_strtoofft(s);
+  return cvt_strtoofft(s);
 }
 
 off_t get_size(headers_t& meta)
@@ -802,9 +852,9 @@ off_t get_size(headers_t& meta)
   return get_size((*iter).second.c_str());
 }
 
-mode_t get_mode(const char *s)
+mode_t get_mode(const char *s, int base)
 {
-  return static_cast<mode_t>(s3fs_strtoofft(s));
+  return static_cast<mode_t>(cvt_strtoofft(s, base));
 }
 
 mode_t get_mode(headers_t& meta, const char* path, bool checkdir, bool forcedir)
@@ -818,6 +868,8 @@ mode_t get_mode(headers_t& meta, const char* path, bool checkdir, bool forcedir)
   }else if(meta.end() != (iter = meta.find("x-amz-meta-permissions"))){ // for s3sync
     mode = get_mode((*iter).second.c_str());
     isS3sync = true;
+  }else if(meta.end() != (iter = meta.find("x-amz-meta-goog-reserved-posix-mode"))){ // for GCS
+    mode = get_mode((*iter).second.c_str(), 8);
   }else{
     // If another tool creates an object without permissions, default to owner
     // read-write and group readable.
@@ -886,7 +938,7 @@ mode_t get_mode(headers_t& meta, const char* path, bool checkdir, bool forcedir)
 
 uid_t get_uid(const char *s)
 {
-  return static_cast<uid_t>(s3fs_strtoofft(s));
+  return static_cast<uid_t>(cvt_strtoofft(s));
 }
 
 uid_t get_uid(headers_t& meta)
@@ -896,6 +948,8 @@ uid_t get_uid(headers_t& meta)
     return get_uid((*iter).second.c_str());
   }else if(meta.end() != (iter = meta.find("x-amz-meta-owner"))){ // for s3sync
     return get_uid((*iter).second.c_str());
+  }else if(meta.end() != (iter = meta.find("x-amz-meta-goog-reserved-posix-uid"))){ // for GCS
+    return get_uid((*iter).second.c_str());
   }else{
     return geteuid();
   }
@@ -903,7 +957,7 @@ uid_t get_uid(headers_t& meta)
 
 gid_t get_gid(const char *s)
 {
-  return static_cast<gid_t>(s3fs_strtoofft(s));
+  return static_cast<gid_t>(cvt_strtoofft(s));
 }
 
 gid_t get_gid(headers_t& meta)
@@ -912,6 +966,8 @@ gid_t get_gid(headers_t& meta)
   if(meta.end() != (iter = meta.find("x-amz-meta-gid"))){
     return get_gid((*iter).second.c_str());
   }else if(meta.end() != (iter = meta.find("x-amz-meta-group"))){ // for s3sync
+    return get_gid((*iter).second.c_str());
+  }else if(meta.end() != (iter = meta.find("x-amz-meta-goog-reserved-posix-gid"))){ // for GCS
     return get_gid((*iter).second.c_str());
   }else{
     return getegid();
@@ -1097,7 +1153,7 @@ void show_help ()
     "\n"
     "   storage_class (default=\"standard\")\n"
     "      - store object with specified storage class.  Possible values:\n"
-    "        standard, standard_ia, onezone_ia, reduced_redundancy and intelligent_tiering.\n"
+    "        standard, standard_ia, onezone_ia, reduced_redundancy, intelligent_tiering and glacier.\n"
     "\n"
     "   use_rrs (default is disable)\n"
     "      - use Amazon's Reduced Redundancy Storage.\n"
@@ -1202,12 +1258,12 @@ void show_help ()
     "      - maximum number of entries in the stat cache, and this maximum is\n"
     "        also treated as the number of symbolic link cache.\n"
     "\n"
-    "   stat_cache_expire (default is no expire)\n"
+    "   stat_cache_expire (default is 900))\n"
     "      - specify expire time (seconds) for entries in the stat cache.\n"
     "        This expire time indicates the time since stat cached. and this\n"
     "        is also set to the expire time of the symbolic link cache.\n"
     "\n"
-    "   stat_cache_interval_expire (default is no expire)\n"
+    "   stat_cache_interval_expire (default is 900)\n"
     "      - specify expire time (seconds) for entries in the stat cache(and\n"
     "        symbolic link cache).\n"
     "      This expire time is based on the time from the last access time\n"
@@ -1231,11 +1287,11 @@ void show_help ()
     "   ssl_verify_hostname (default=\"2\")\n"
     "      - When 0, do not verify the SSL certificate against the hostname.\n"
     "\n"
-    "   nodnscache (disable dns cache)\n"
-    "      - s3fs is always using dns cache, this option make dns cache disable.\n"
+    "   nodnscache (disable DNS cache)\n"
+    "      - s3fs is always using DNS cache, this option make DNS cache disable.\n"
     "\n"
-    "   nosscache (disable ssl session cache)\n"
-    "      - s3fs is always using ssl session cache, this option make ssl \n"
+    "   nosscache (disable SSL session cache)\n"
+    "      - s3fs is always using SSL session cache, this option make SSL \n"
     "      session cache disable.\n"
     "\n"
     "   multireq_max (default=\"20\")\n"
@@ -1411,23 +1467,30 @@ void show_help ()
     "        only \"dir/\" object.\n"
     "\n"
     "   use_wtf8 - support arbitrary file system encoding.\n"
-    "        S3 requires all object names to be valid utf-8. But some\n"
+    "        S3 requires all object names to be valid UTF-8. But some\n"
     "        clients, notably Windows NFS clients, use their own encoding.\n"
-    "        This option re-encodes invalid utf-8 object names into valid\n"
-    "        utf-8 by mapping offending codes into a 'private' codepage of the\n"
+    "        This option re-encodes invalid UTF-8 object names into valid\n"
+    "        UTF-8 by mapping offending codes into a 'private' codepage of the\n"
     "        Unicode set.\n"
-    "        Useful on clients not using utf-8 as their file system encoding.\n"
+    "        Useful on clients not using UTF-8 as their file system encoding.\n"
     "\n"
     "   use_session_token - indicate that session token should be provided.\n"
     "        If credentials are provided by environment variables this switch\n"
     "        forces presence check of AWSSESSIONTOKEN variable.\n"
-    "        Otherwise an error is returned."
+    "        Otherwise an error is returned.\n"
     "\n"
     "   requester_pays (default is disable)\n"
     "        This option instructs s3fs to enable requests involving\n"
     "        Requester Pays buckets.\n"
     "        It includes the 'x-amz-request-payer=requester' entry in the\n"
-    "        request header."
+    "        request header.\n"
+    "\n"
+    "   mime (default is \"/etc/mime.types\")\n"
+    "        Specify the path of the mime.types file.\n"
+    "        If this option is not specified, the existence of \"/etc/mime.types\"\n"
+    "        is checked, and that file is loaded as mime information.\n"
+    "        If this file does not exist on macOS, then \"/etc/apache2/mime.types\"\n"
+    "        is checked as well.\n"
     "\n"
     "   dbglevel (default=\"crit\")\n"
     "        Set the debug message level. set value as crit (critical), err\n"
@@ -1438,6 +1501,19 @@ void show_help ()
     "\n"
     "   curldbg - put curl debug message\n"
     "        Put the debug message from libcurl when this option is specified.\n"
+    "        Specify \"normal\" or \"body\" for the parameter.\n"
+    "        If the parameter is omitted, it is the same as \"normal\".\n"
+    "        If \"body\" is specified, some API communication body data will be\n"
+    "        output in addition to the debug message output as \"normal\".\n"
+    "\n"
+    "   set_check_cache_sigusr1 (default is stdout)\n"
+    "        If the cache is enabled, you can check the integrity of the\n"
+    "        cache file and the cache file's stats info file.\n"
+    "        This option is specified and when sending the SIGUSR1 signal\n"
+    "        to the s3fs process checks the cache status at that time.\n"
+    "        This option can take a file path as parameter to output the\n"
+    "        check result to that file. The file path parameter can be omitted.\n"
+    "        If omitted, the result will be output to stdout or syslog.\n"
     "\n"
     "FUSE/mount Options:\n"
     "\n"
@@ -1473,7 +1549,7 @@ void show_help ()
     " -d  --debug       Turn on DEBUG messages to syslog. Specifying -d\n"
     "                   twice turns on FUSE debug messages to STDOUT.\n"
     " -f                FUSE foreground option - do not run as daemon.\n"
-    " -s                FUSE singlethreaded option\n"
+    " -s                FUSE single-threaded option\n"
     "                   disable multi-threaded operation\n"
     "\n"
     "\n"

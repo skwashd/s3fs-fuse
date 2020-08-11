@@ -1,18 +1,18 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python2
 
 import os
 import sys
 
+if len(sys.argv) < 4 or len(sys.argv) % 2 != 0:
+    sys.exit("Usage: %s OUTFILE OFFSET_1 SIZE_1 [OFFSET_N SIZE_N]...")
+
 filename = sys.argv[1]
-data = bytes('a', 'utf-8')
 
 fd = os.open(filename, os.O_CREAT | os.O_TRUNC | os.O_WRONLY)
 try:
-    os.pwrite(fd, data, 1024)
-    os.pwrite(fd, data, 16 * 1024 * 1024)
-    os.pwrite(fd, data, 18 * 1024 * 1024)
+    for i in range(2, len(sys.argv), 2):
+        data = "a" * int(sys.argv[i+1])
+        os.lseek(fd, int(sys.argv[i]), os.SEEK_SET)
+        os.write(fd, data)
 finally:
     os.close(fd)
-
-stat = os.lstat(filename)
-assert stat.st_size == 18 * 1024 * 1024 + 1

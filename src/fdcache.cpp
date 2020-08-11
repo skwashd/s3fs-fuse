@@ -31,6 +31,7 @@
 #include <cerrno>
 #include <cstring>
 #include <dirent.h>
+#include <stddef.h>
 #include <curl/curl.h>
 #include <string>
 #include <iostream>
@@ -40,18 +41,19 @@
 #include <vector>
 
 #include "common.h"
-#include "fdcache.h"
 #include "s3fs.h"
 #include "s3fs_util.h"
 #include "string_util.h"
 #include "curl.h"
+#include "fdcache.h"
 
 using namespace std;
 
 //------------------------------------------------
 // Symbols
 //------------------------------------------------
-static const int MAX_MULTIPART_CNT = 10 * 1000;  // S3 multipart max count
+static const int MAX_MULTIPART_CNT         = 10 * 1000; // S3 multipart max count
+static const int CHECK_CACHEFILE_PART_SIZE = 1024 * 16;	// Buffer size in PageList::CheckZeroAreaInFile()
 
 //
 // For cache directory top path
@@ -62,16 +64,53 @@ static const int MAX_MULTIPART_CNT = 10 * 1000;  // S3 multipart max count
 #define TMPFILE_DIR_0PATH   "/tmp"
 #endif
 
+//
+// The following symbols are used by FdManager::RawCheckAllCache().
+//
+#define CACHEDBG_FMT_DIR_PROB   "Directory: %s"
+#define CACHEDBG_FMT_HEAD       "------------------------------------------------------------\n" \
+                                "Check cache file and its stats file consistency\n" \
+                                "------------------------------------------------------------"
+#define CACHEDBG_FMT_FOOT       "------------------------------------------------------------\n" \
+                                "Summary - Total files:                %d\n" \
+                                "          Detected error files:       %d\n" \
+                                "          Detected error directories: %d\n" \
+                                "------------------------------------------------------------"
+#define CACHEDBG_FMT_FILE_OK    "File:      %s%s    -> [OK] no problem"
+#define CACHEDBG_FMT_FILE_PROB  "File:      %s%s"
+#define CACHEDBG_FMT_DIR_PROB   "Directory: %s"
+#define CACHEDBG_FMT_ERR_HEAD   "           -> [E] there is a mark that data exists in stats, but there is no data in the cache file."
+#define CACHEDBG_FMT_WARN_HEAD  "           -> [W] These show no data in stats, but there is evidence of data in the cache file(no problem)."
+#define CACHEDBG_FMT_WARN_OPEN  "\n           -> [W] This file is currently open and may not provide accurate analysis results."
+#define CACHEDBG_FMT_CRIT_HEAD  "           -> [C] %s"
+#define CACHEDBG_FMT_CRIT_HEAD2 "           -> [C] "
+#define CACHEDBG_FMT_PROB_BLOCK "                  0x%016jx(0x%016jx bytes)"
+
 //------------------------------------------------
 // CacheFileStat class methods
 //------------------------------------------------
+string CacheFileStat::GetCacheFileStatTopDir()
+{
+  string top_path("");
+  if(!FdManager::IsCacheDir() || bucket.empty()){
+    return top_path;
+  }
+
+  // stat top dir( "/<cache_dir>/.<bucket_name>.stat" )
+  top_path += FdManager::GetCacheDir();
+  top_path += "/.";
+  top_path += bucket;
+  top_path += ".stat";
+  return top_path;
+}
+
 bool CacheFileStat::MakeCacheFileStatPath(const char* path, string& sfile_path, bool is_create_dir)
 {
-  // make stat dir top path( "/<cache_dir>/.<bucket_name>.stat" )
-  string top_path = FdManager::GetCacheDir();
-  top_path       += "/.";
-  top_path       += bucket;
-  top_path       += ".stat";
+  string top_path = CacheFileStat::GetCacheFileStatTopDir();
+  if(top_path.empty()){
+    S3FS_PRN_ERR("The path to cache top dir is empty.");
+    return false;
+  }
 
   if(is_create_dir){
     int result;
@@ -90,14 +129,11 @@ bool CacheFileStat::MakeCacheFileStatPath(const char* path, string& sfile_path, 
 
 bool CacheFileStat::CheckCacheFileStatTopDir()
 {
-  if(!FdManager::IsCacheDir()){
+  string top_path = CacheFileStat::GetCacheFileStatTopDir();
+  if(top_path.empty()){
+    S3FS_PRN_INFO("The path to cache top dir is empty, thus not need to check permission.");
     return true;
   }
-  // make stat dir top path( "/<cache_dir>/.<bucket_name>.stat" )
-  string top_path = FdManager::GetCacheDir();
-  top_path       += "/.";
-  top_path       += bucket;
-  top_path       += ".stat";
 
   return check_exist_dir_permission(top_path.c_str());
 }
@@ -130,14 +166,11 @@ bool CacheFileStat::DeleteCacheFileStat(const char* path)
 //
 bool CacheFileStat::DeleteCacheFileStatDirectory()
 {
-  string top_path = FdManager::GetCacheDir();
-
-  if(top_path.empty() || bucket.empty()){
+  string top_path = CacheFileStat::GetCacheFileStatTopDir();
+  if(top_path.empty()){
+    S3FS_PRN_INFO("The path to cache top dir is empty, thus not need to remove it.");
     return true;
   }
-  top_path       += "/.";
-  top_path       += bucket;
-  top_path       += ".stat";
   return delete_files_in_dir(top_path.c_str(), true);
 }
 
@@ -207,16 +240,14 @@ bool CacheFileStat::SetPath(const char* tpath, bool is_open)
     // could not close old stat file.
     return false;
   }
-  if(tpath){
-    path = tpath;
-  }
+  path = tpath;
   if(!is_open){
     return true;
   }
   return Open();
 }
 
-bool CacheFileStat::Open()
+bool CacheFileStat::RawOpen(bool readonly)
 {
   if(path.empty()){
     return false;
@@ -232,9 +263,16 @@ bool CacheFileStat::Open()
     return false;
   }
   // open
-  if(-1 == (fd = open(sfile_path.c_str(), O_CREAT|O_RDWR, 0600))){
-    S3FS_PRN_ERR("failed to open cache stat file path(%s) - errno(%d)", path.c_str(), errno);
-    return false;
+  if(readonly){
+    if(-1 == (fd = open(sfile_path.c_str(), O_RDONLY))){
+      S3FS_PRN_ERR("failed to read only open cache stat file path(%s) - errno(%d)", path.c_str(), errno);
+      return false;
+    }
+  }else{
+    if(-1 == (fd = open(sfile_path.c_str(), O_CREAT|O_RDWR, 0600))){
+      S3FS_PRN_ERR("failed to open cache stat file path(%s) - errno(%d)", path.c_str(), errno);
+      return false;
+    }
   }
   // lock
   if(-1 == flock(fd, LOCK_EX)){
@@ -254,6 +292,16 @@ bool CacheFileStat::Open()
   S3FS_PRN_DBG("file locked(%s - %s)", path.c_str(), sfile_path.c_str());
 
   return true;
+}
+
+bool CacheFileStat::Open()
+{
+  return RawOpen(false);
+}
+
+bool CacheFileStat::ReadOnlyOpen()
+{
+  return RawOpen(true);
 }
 
 bool CacheFileStat::Release()
@@ -276,6 +324,306 @@ bool CacheFileStat::Release()
   fd = -1;
 
   return true;
+}
+
+//------------------------------------------------
+// fdpage_list_t utility
+//------------------------------------------------
+// Inline function for repeated processing
+inline void raw_add_compress_fdpage_list(fdpage_list_t& pagelist, fdpage& page, bool ignore_load, bool ignore_modify, bool default_load, bool default_modify)
+{
+  if(0 < page.bytes){
+    // [NOTE]
+    // The page variable is subject to change here.
+    //
+    if(ignore_load){
+      page.loaded   = default_load;
+    }
+    if(ignore_modify){
+      page.modified = default_modify;
+    }
+    pagelist.push_back(page);
+  }
+}
+
+// Compress the page list
+//
+// ignore_load:     Ignore the flag of loaded member and compress
+// ignore_modify:   Ignore the flag of modified member and compress
+// default_load:    loaded flag value in the list after compression when ignore_load=true
+// default_modify:  modified flag value in the list after compression when default_modify=true
+//
+// NOTE: ignore_modify and ignore_load cannot both be true.
+//
+static fdpage_list_t raw_compress_fdpage_list(const fdpage_list_t& pages, bool ignore_load, bool ignore_modify, bool default_load, bool default_modify)
+{
+  fdpage_list_t compressed_pages;
+  fdpage        tmppage;
+  bool          is_first = true;
+  for(fdpage_list_t::const_iterator iter = pages.begin(); iter != pages.end(); ++iter){
+    if(!is_first){
+      if( (!ignore_load   && (tmppage.loaded   != iter->loaded  )) ||
+          (!ignore_modify && (tmppage.modified != iter->modified)) )
+      {
+        // Different from the previous area, add it to list
+        raw_add_compress_fdpage_list(compressed_pages, tmppage, ignore_load, ignore_modify, default_load, default_modify);
+
+        // keep current area
+        tmppage = fdpage(iter->offset, iter->bytes, (ignore_load ? default_load : iter->loaded), (ignore_modify ? default_modify : iter->modified));
+      }else{
+        // Same as the previous area
+        if(tmppage.next() != iter->offset){
+          // These are not contiguous areas, add it to list
+          raw_add_compress_fdpage_list(compressed_pages, tmppage, ignore_load, ignore_modify, default_load, default_modify);
+
+          // keep current area
+          tmppage = fdpage(iter->offset, iter->bytes, (ignore_load ? default_load : iter->loaded), (ignore_modify ? default_modify : iter->modified));
+        }else{
+          // These are contiguous areas
+
+          // add current area
+          tmppage.bytes += iter->bytes;
+        }
+      }
+    }else{
+      // first erea
+      is_first = false;
+
+      // keep current area
+      tmppage = fdpage(iter->offset, iter->bytes, (ignore_load ? default_load : iter->loaded), (ignore_modify ? default_modify : iter->modified));
+    }
+  }
+  // add lastest area
+  if(!is_first){
+    raw_add_compress_fdpage_list(compressed_pages, tmppage, ignore_load, ignore_modify, default_load, default_modify);
+  }
+  return compressed_pages;
+}
+
+static fdpage_list_t compress_fdpage_list_ignore_modify(const fdpage_list_t& pages, bool default_modify)
+{
+  return raw_compress_fdpage_list(pages, /* ignore_load= */ false, /* ignore_modify= */ true, /* default_load= */false, /* default_modify= */default_modify);
+}
+
+static fdpage_list_t compress_fdpage_list_ignore_load(const fdpage_list_t& pages, bool default_load)
+{
+  return raw_compress_fdpage_list(pages, /* ignore_load= */ true, /* ignore_modify= */ false, /* default_load= */default_load, /* default_modify= */false);
+}
+
+static fdpage_list_t compress_fdpage_list(const fdpage_list_t& pages)
+{
+  return raw_compress_fdpage_list(pages, /* ignore_load= */ false, /* ignore_modify= */ false, /* default_load= */false, /* default_modify= */false);
+}
+
+static fdpage_list_t parse_partsize_fdpage_list(const fdpage_list_t& pages, off_t max_partsize)
+{
+  fdpage_list_t parsed_pages;
+  for(fdpage_list_t::const_iterator iter = pages.begin(); iter != pages.end(); ++iter){
+    if(iter->modified){
+      // modified page
+      fdpage tmppage = *iter;
+      for(off_t start = iter->offset, rest_bytes = iter->bytes; 0 < rest_bytes; ){
+        if((max_partsize * 2) < rest_bytes){
+          // do parse
+          tmppage.offset = start;
+          tmppage.bytes  = max_partsize;
+          parsed_pages.push_back(tmppage);
+
+          start      += max_partsize;
+          rest_bytes -= max_partsize;
+        }else{
+          // Since the number of remaining bytes is less than twice max_partsize,
+          // one of the divided areas will be smaller than max_partsize.
+          // Therefore, this area at the end should not be divided.
+          tmppage.offset = start;
+          tmppage.bytes  = rest_bytes;
+          parsed_pages.push_back(tmppage);
+
+          start      += rest_bytes;
+          rest_bytes  = 0;
+        }
+      }
+    }else{
+      // not modified page is not parsed
+      parsed_pages.push_back(*iter);
+    }
+  }
+  return parsed_pages;
+}
+
+//------------------------------------------------
+// PageList class methods
+//------------------------------------------------
+//
+// Examine and return the status of each block in the file.
+//
+// Assuming the file is a sparse file, check the HOLE and DATA areas
+// and return it in fdpage_list_t. The loaded flag of each fdpage is
+// set to false for HOLE blocks and true for DATA blocks.
+//
+bool PageList::GetSparseFilePages(int fd, size_t file_size, fdpage_list_t& sparse_list)
+{
+  // [NOTE]
+  // Express the status of the cache file using fdpage_list_t.
+  // There is a hole in the cache file(sparse file), and the
+  // state of this hole is expressed by the "loaded" member of
+  // struct fdpage. (the "modified" member is not used)
+  //
+  if(0 == file_size){
+    // file is empty
+    return true;
+  }
+
+  bool is_hole   = false;
+  int  hole_pos  = lseek(fd, 0, SEEK_HOLE);
+  int  data_pos  = lseek(fd, 0, SEEK_DATA);
+  if(-1 == hole_pos && -1 == data_pos){
+    S3FS_PRN_ERR("Could not find the first position both HOLE and DATA in the file(fd=%d).", fd);
+    return false;
+  }else if(-1 == hole_pos){
+    is_hole   = false;
+  }else if(-1 == data_pos){
+    is_hole   = true;
+  }else if(hole_pos < data_pos){
+    is_hole   = true;
+  }else{
+    is_hole   = false;
+  }
+
+  for(int cur_pos = 0, next_pos = 0; 0 <= cur_pos; cur_pos = next_pos, is_hole = !is_hole){
+    fdpage page;
+    page.offset   = cur_pos;
+    page.loaded   = !is_hole;
+    page.modified = false;
+
+    next_pos = lseek(fd, cur_pos, (is_hole ? SEEK_DATA : SEEK_HOLE));
+    if(-1 == next_pos){
+      page.bytes = static_cast<off_t>(file_size - cur_pos);
+    }else{
+      page.bytes = next_pos - cur_pos;
+    }
+    sparse_list.push_back(page);
+  }
+  return true;
+}
+
+//
+// Confirm that the specified area is ZERO
+//
+bool PageList::CheckZeroAreaInFile(int fd, off_t start, size_t bytes)
+{
+  char* readbuff = new char[CHECK_CACHEFILE_PART_SIZE];
+
+  for(size_t comp_bytes = 0, check_bytes = 0; comp_bytes < bytes; comp_bytes += check_bytes){
+    if(CHECK_CACHEFILE_PART_SIZE < (bytes - comp_bytes)){
+      check_bytes = CHECK_CACHEFILE_PART_SIZE;
+    }else{
+      check_bytes = bytes - comp_bytes;
+    }
+    bool    found_bad_data = false;
+    ssize_t read_bytes;
+    if(-1 == (read_bytes = pread(fd, readbuff, check_bytes, (start + comp_bytes)))){
+      S3FS_PRN_ERR("Something error is occurred in reading %zu bytes at %lld from file(%d).", check_bytes, static_cast<long long int>(start + comp_bytes), fd);
+      found_bad_data = true;
+    }else{
+      check_bytes = static_cast<size_t>(read_bytes);
+      for(size_t tmppos = 0; tmppos < check_bytes; ++tmppos){
+        if('\0' != readbuff[tmppos]){
+          // found not ZERO data.
+          found_bad_data = true;
+          break;
+        }
+      }
+    }
+    if(found_bad_data){
+      delete[] readbuff;
+      return false;
+    }
+  }
+  delete[] readbuff;
+  return true;
+}
+
+//
+// Checks that the specified area matches the state of the sparse file.
+//
+// [Parameters]
+// checkpage:    This is one state of the cache file, it is loaded from the stats file.
+// sparse_list:  This is a list of the results of directly checking the cache file status(HOLE/DATA).
+//               In the HOLE area, the "loaded" flag of fdpage is false. The DATA area has it set to true.
+// fd:           opened file discriptor to target cache file.
+//
+bool PageList::CheckAreaInSparseFile(const struct fdpage& checkpage, const fdpage_list_t& sparse_list, int fd, fdpage_list_t& err_area_list, fdpage_list_t& warn_area_list)
+{
+  // Check the block status of a part(Check Area: checkpage) of the target file.
+  // The elements of sparse_list have 5 patterns that overlap this block area.
+  //
+  // File           |<---...--------------------------------------...--->|
+  // Check Area              (offset)<-------------------->(offset + bytes - 1)
+  // Area case(0)       <------->
+  // Area case(1)                                            <------->
+  // Area case(2)              <-------->
+  // Area case(3)                                 <---------->
+  // Area case(4)                      <----------->
+  // Area case(5)              <----------------------------->
+  //
+  bool result = true;
+
+  for(fdpage_list_t::const_iterator iter = sparse_list.begin(); iter != sparse_list.end(); ++iter){
+    off_t check_start = 0;
+    off_t check_bytes = 0;
+    if((iter->offset + iter->bytes) <= checkpage.offset){
+      // case 0
+      continue;    // next
+
+    }else if((checkpage.offset + checkpage.bytes) <= iter->offset){
+      // case 1
+      break;       // finish
+
+    }else if(iter->offset < checkpage.offset && (iter->offset + iter->bytes) < (checkpage.offset + checkpage.bytes)){
+      // case 2
+      check_start = checkpage.offset;
+      check_bytes = iter->bytes - (checkpage.offset - iter->offset);
+
+    }else if(iter->offset < (checkpage.offset + checkpage.bytes) && (checkpage.offset + checkpage.bytes) < (iter->offset + iter->bytes)){
+      // case 3
+      check_start = iter->offset;
+      check_bytes = checkpage.bytes - (iter->offset - checkpage.offset);
+
+    }else if(checkpage.offset < iter->offset && (iter->offset + iter->bytes) < (checkpage.offset + checkpage.bytes)){
+      // case 4
+      check_start = iter->offset;
+      check_bytes = iter->bytes;
+
+    }else{  // (iter->offset <= checkpage.offset && (checkpage.offset + checkpage.bytes) <= (iter->offset + iter->bytes))
+      // case 5
+      check_start = checkpage.offset;
+      check_bytes = checkpage.bytes;
+    }
+
+    // check target area type
+    if(checkpage.loaded || checkpage.modified){
+      // target area must be not HOLE(DATA) area.
+      if(!iter->loaded){
+        // Found bad area, it is HOLE area.
+        fdpage page(check_start, check_bytes, false, false);
+        err_area_list.push_back(page);
+        result = false;
+      }
+    }else{
+      // target area should be HOLE area.(If it is not a block boundary, it may be a DATA area.)
+      if(iter->loaded){
+        // need to check this area's each data, it should be ZERO.
+        if(!PageList::CheckZeroAreaInFile(fd, check_start, static_cast<size_t>(check_bytes))){
+          // Discovered an area that has un-initial status data but it probably does not effect bad.
+          fdpage page(check_start, check_bytes, true, false);
+          warn_area_list.push_back(page);
+          result = false;
+        }
+      }
+    }
+  }
+  return result;
 }
 
 //------------------------------------------------
@@ -311,8 +659,10 @@ void PageList::Clear()
 bool PageList::Init(off_t size, bool is_loaded, bool is_modified)
 {
   Clear();
-  fdpage page(0, size, is_loaded, is_modified);
-  pages.push_back(page);
+  if(0 < size){
+    fdpage page(0, size, is_loaded, is_modified);
+    pages.push_back(page);
+  }
   return true;
 }
 
@@ -325,37 +675,9 @@ off_t PageList::Size() const
   return riter->next();
 }
 
-bool PageList::Compress(bool force_modified)
+bool PageList::Compress()
 {
-  bool is_first         = true;
-  bool is_last_loaded   = false;
-  bool is_last_modified = false;
-
-  for(fdpage_list_t::iterator iter = pages.begin(); iter != pages.end(); ){
-    if(is_first){
-      is_first         = false;
-      is_last_loaded   = force_modified ? true : iter->loaded;
-      is_last_modified = iter->modified;
-      ++iter;
-    }else{
-      if(is_last_modified == iter->modified){
-        if(force_modified || is_last_loaded == iter->loaded){
-          fdpage_list_t::iterator biter = iter;
-          --biter;
-          biter->bytes += iter->bytes;
-          iter = pages.erase(iter);
-        }else{
-          is_last_loaded   = iter->loaded;
-          is_last_modified = iter->modified;
-          ++iter;
-        }
-      }else{
-        is_last_loaded   = force_modified ? true : iter->loaded;
-        is_last_modified = iter->modified;
-        ++iter;
-      }
-    }
-  }
+  pages = compress_fdpage_list(pages);
   return true;
 }
 
@@ -366,7 +688,7 @@ bool PageList::Parse(off_t new_pos)
       // nothing to do
       return true;
     }else if(iter->offset < new_pos && new_pos < iter->next()){
-      fdpage page(iter->offset, new_pos - iter->offset, iter->loaded, false);
+      fdpage page(iter->offset, new_pos - iter->offset, iter->loaded, iter->modified);
       iter->bytes -= (new_pos - iter->offset);
       iter->offset = new_pos;
       pages.insert(iter, page);
@@ -558,253 +880,104 @@ int PageList::GetUnloadedPages(fdpage_list_t& unloaded_list, off_t start, off_t 
 // This method checks the current PageList status and returns the area that needs
 // to be downloaded so that each part is at least 5 MB.
 //
-bool PageList::GetLoadPageListForMultipartUpload(fdpage_list_t& dlpages)
+bool PageList::GetPageListsForMultipartUpload(fdpage_list_t& dlpages, fdpage_list_t& mixuppages, off_t max_partsize)
 {
   // compress before this processing
   if(!Compress()){
     return false;
   }
 
-  bool  is_prev_modified_page = false;
-  off_t accumulated_bytes     = 0;
-  off_t last_modified_bytes   = 0;
-
-  for(fdpage_list_t::const_iterator iter = pages.begin(); iter != pages.end(); ++iter){
+  // make a list by modified flag
+  fdpage_list_t modified_pages = compress_fdpage_list_ignore_load(pages, false);
+  fdpage_list_t download_pages;         // A non-contiguous page list showing the areas that need to be downloaded
+  fdpage_list_t mixupload_pages;        // A continuous page list showing only modified flags for mixupload
+  fdpage        prev_page;
+  for(fdpage_list_t::const_iterator iter = modified_pages.begin(); iter != modified_pages.end(); ++iter){
     if(iter->modified){
-      // this is modified page
-      if(is_prev_modified_page){
-        // in case of continuous modified page
-        accumulated_bytes += iter->bytes;
+      // current is modified area
+      if(!prev_page.modified){
+        // previous is not modified area
+        if(prev_page.bytes < static_cast<const off_t>(MIN_MULTIPART_SIZE)){
+          // previous(not modified) area is too small for one multipart size,
+          // then all of previous area is needed to download.
+          download_pages.push_back(prev_page);
 
-      }else{
-        // previous page is unmodified page
-        // check unmodified page bytes is over minimum size(5MB)
-        if(static_cast<const off_t>(MIN_MULTIPART_SIZE) <= accumulated_bytes){
-          // over minimum size
-          accumulated_bytes = iter->bytes;                          // reset accumulated size
-
+          // previous(not modified) area is set upload area.
+          prev_page.modified = true;
+          mixupload_pages.push_back(prev_page);
         }else{
-          // less than minimum size(5MB)
-          // the previous unmodified page needs to load, if it is not loaded.
-          // and that page will be included in consecutive modified page.
-          PageList::RawGetUnloadPageList(dlpages, (iter->offset - accumulated_bytes), accumulated_bytes);
-
-          accumulated_bytes  += last_modified_bytes + iter->bytes;  // this page size and last modified page size are accumulated
-          last_modified_bytes = 0;
+          // previous(not modified) area is set copy area.
+          prev_page.modified = false;
+          mixupload_pages.push_back(prev_page);
         }
-        is_prev_modified_page = true;
+        // set current to previous
+        prev_page = *iter;
+      }else{
+        // previous is modified area, too
+        prev_page.bytes += iter->bytes;
       }
 
     }else{
-      // this is unmodified page
-      if(!is_prev_modified_page){
-        // in case of continuous unmodified page
-        accumulated_bytes += iter->bytes;
+      // current is not modified area
+      if(!prev_page.modified){
+        // previous is not modified area, too
+        prev_page.bytes += iter->bytes;
 
       }else{
-        // previous page is modified page
-        // check modified page bytes is over minimum size(5MB)
-        if(static_cast<const off_t>(MIN_MULTIPART_SIZE) <= accumulated_bytes){
-          // over minimum size
-          last_modified_bytes   = accumulated_bytes;    // backup last modified page size
-          accumulated_bytes     = iter->bytes;          // set new accumulated size(this page size)
-          is_prev_modified_page = false;
+        // previous is modified area
+        if(prev_page.bytes < static_cast<const off_t>(MIN_MULTIPART_SIZE)){
+          // previous(modified) area is too small for one multipart size,
+          // then part or all of current area is needed to download.
+          off_t  missing_bytes = static_cast<const off_t>(MIN_MULTIPART_SIZE) - prev_page.bytes;
 
-        }else{
-          // less than minimum size(5MB)
-          // this unmodified page needs to load, if it is not loaded.
-          // and this page will be included in consecutive modified page.
-          if((static_cast<const off_t>(MIN_MULTIPART_SIZE) - accumulated_bytes) <= iter->bytes){
-            // Split the missing size from this page size for just before modified page.
-            if(!iter->loaded){
-              // because this page is not loaded
-              fdpage    dlpage(iter->offset, (iter->bytes - (static_cast<const off_t>(MIN_MULTIPART_SIZE) - accumulated_bytes)));   // don't care for loaded/modified flag
-              dlpages.push_back(dlpage);
-            }
-            last_modified_bytes   = static_cast<const off_t>(MIN_MULTIPART_SIZE);                                       // backup last modified page size
-            accumulated_bytes     = iter->bytes - (static_cast<const off_t>(MIN_MULTIPART_SIZE) - accumulated_bytes);   // set rest bytes to accumulated size
-            is_prev_modified_page = false;
+          if((missing_bytes + static_cast<const off_t>(MIN_MULTIPART_SIZE)) < iter-> bytes){
+            // The current size is larger than the missing size, and the remainder
+            // after deducting the missing size is larger than the minimum size.
+
+            fdpage missing_page(iter->offset, missing_bytes, false, false);
+            download_pages.push_back(missing_page);
+
+            // previous(not modified) area is set upload area.
+            prev_page.bytes = static_cast<const off_t>(MIN_MULTIPART_SIZE);
+            mixupload_pages.push_back(prev_page);
+
+            // set current to previous
+            prev_page = *iter;
+            prev_page.offset += missing_bytes;
+            prev_page.bytes  -= missing_bytes;
 
           }else{
-            // assign all this page sizes to just before modified page.
-            // but still it is not enough for the minimum size.
-            if(!iter->loaded){
-              // because this page is not loaded
-              fdpage    dlpage(iter->offset, iter->bytes);  // don't care for loaded/modified flag
-              dlpages.push_back(dlpage);
-            }
-            accumulated_bytes += iter->bytes;               // add all bytes to accumulated size
+            // The current size is less than the missing size, or the remaining
+            // size less the missing size is less than the minimum size.
+            download_pages.push_back(*iter);
+
+            // add current to previous
+            prev_page.bytes += iter->bytes;
           }
-        }
-      }
-    }
-  }
-
-  // compress dlpages
-  bool is_first = true;
-  for(fdpage_list_t::iterator dliter = dlpages.begin(); dliter != dlpages.end(); ){
-    if(is_first){
-      is_first = false;
-      ++dliter;
-      continue;
-    }
-    fdpage_list_t::iterator biter = dliter;
-    --biter;
-    if((biter->offset + biter->bytes) == dliter->offset){
-      biter->bytes += dliter->bytes;
-      dliter = dlpages.erase(dliter);
-    }else{
-      ++dliter;
-    }
-  }
-
-  return true;
-}
-
-// [NOTE]
-// This static method assumes that it is called only from GetLoadPageListForMultipartUpload.
-// If you want to exclusive control, please do with GetLoadPageListForMultipartUpload,
-// not with this method.
-//
-bool PageList::RawGetUnloadPageList(fdpage_list_t& dlpages, off_t offset, off_t size)
-{
-  for(fdpage_list_t::const_iterator iter = pages.begin(); iter != pages.end(); ++iter){
-    if((iter->offset + iter->bytes) <= offset){
-      continue;
-    }else if((offset + size) <= iter->offset){
-      break;
-    }else{
-      if(!iter->loaded && !iter->modified){
-        fdpage    dlpage(iter->offset, iter->bytes);       // don't care for loaded/modified flag
-        dlpages.push_back(dlpage);
-      }
-    }
-  }
-  return true;
-}
-
-bool PageList::GetMultipartSizeList(fdpage_list_t& mplist, off_t partsize) const
-{
-  if(!mplist.empty()){
-    return false;
-  }
-
-  // temporary page list
-  PageList tmpPageObj(*this);
-  if(!tmpPageObj.Compress(true)){   // compress by modified flag
-    return false;
-  }
-
-  // [NOTE]
-  // Set the modified flag in page list to the minimum size.
-  // This process needs to match the GetLoadPageListForMultipartUpload method exactly.
-  //
-  // [FIXME]
-  // Make the common processing of GetLoadPageListForMultipartUpload and this method
-  // to one method.
-  //
-  bool  is_first              = true;
-  bool  is_prev_modified_page = false;
-  off_t accumulated_bytes     = 0;
-  off_t last_modified_bytes   = 0;
-  fdpage_list_t::iterator     iter;
-
-  for(iter = tmpPageObj.pages.begin(); iter != tmpPageObj.pages.end(); ++iter){
-    if(is_first){
-      is_prev_modified_page = iter->modified;
-      is_first              = false;
-    }
-    if(iter->modified){
-      // this is modified page
-      if(is_prev_modified_page){
-        // in case of continuous modified page
-        accumulated_bytes += iter->bytes;
-
-      }else{
-        // previous page is unmodified page
-        // check unmodified page bytes is over minimum size(5MB)
-        if(static_cast<const off_t>(MIN_MULTIPART_SIZE) <= accumulated_bytes){
-          // over minimum size
-          accumulated_bytes = iter->bytes;                          // reset accumulated size
 
         }else{
-          // less than minimum size(5MB)
-          // the previous unmodified page is set modified flag.
-          fdpage_list_t::iterator biter = iter;
-          --biter;
-          biter->loaded       = true;
-          biter->modified     = true;
-          accumulated_bytes  += last_modified_bytes + iter->bytes;  // this page size and last modified page size are accumulated
-          last_modified_bytes = 0;
-        }
-        is_prev_modified_page = true;
-      }
+          // previous(modified) area is enough size for one multipart size.
+          mixupload_pages.push_back(prev_page);
 
-    }else{
-      // this is unmodified page
-      if(!is_prev_modified_page){
-        // in case of continuous unmodified page
-        accumulated_bytes += iter->bytes;
-
-      }else{
-        // previous page is modified page
-        // check modified page bytes is over minimum size(5MB)
-        if(static_cast<const off_t>(MIN_MULTIPART_SIZE) <= accumulated_bytes){
-          // over minimum size
-          last_modified_bytes   = accumulated_bytes;    // backup last modified page size
-          accumulated_bytes     = iter->bytes;          // set new accumulated size(this page size)
-          is_prev_modified_page = false;
-
-        }else{
-          // less than minimum size(5MB)
-          // this unmodified page is set modified flag.
-          if((static_cast<const off_t>(MIN_MULTIPART_SIZE) - accumulated_bytes) <= iter->bytes){
-            // Split the missing size from this page size for just before modified page.
-            fdpage newpage(iter->offset, (static_cast<const off_t>(MIN_MULTIPART_SIZE) - accumulated_bytes), true, true);
-            iter->bytes  -= (static_cast<const off_t>(MIN_MULTIPART_SIZE) - accumulated_bytes);
-            iter->offset += (static_cast<const off_t>(MIN_MULTIPART_SIZE) - accumulated_bytes);
-            tmpPageObj.pages.insert(iter, newpage);
-
-            last_modified_bytes   = static_cast<const off_t>(MIN_MULTIPART_SIZE);   // backup last modified page size
-            accumulated_bytes     = iter->bytes;                                    // set rest bytes to accumulated size
-            is_prev_modified_page = false;
-
-          }else{
-            // assign all this page sizes to just before modified page.
-            // but still it is not enough for the minimum size.
-            accumulated_bytes += iter->bytes;           // add all bytes to accumulated size
-          }
+          // set current to previous
+          prev_page = *iter;
         }
       }
     }
   }
-
-  // recompress
-  if(!tmpPageObj.Compress(true)){   // compress by modified flag
-    return false;
+  // lastest area
+  if(0 < prev_page.bytes){
+    mixupload_pages.push_back(prev_page);
   }
 
-  // normalization for uploading parts
-  for(iter = tmpPageObj.pages.begin(); iter != tmpPageObj.pages.end(); ++iter){
-    off_t  start    = iter->offset;
-    off_t remains   = iter->bytes;
+  // compress
+  dlpages    = compress_fdpage_list_ignore_modify(download_pages, false);
+  mixuppages = compress_fdpage_list_ignore_load(mixupload_pages, false);
 
-    while(0 < remains){
-      off_t     onesize;
-      if(iter->modified){
-        // Uploading parts, this page must be 5MB - partsize
-        onesize = std::min(remains, partsize);
-      }else{
-        // Not uploading parts, this page must be 5MB - 5GB
-        onesize = std::min(remains, static_cast<off_t>(FIVE_GB));
-      }
-      fdpage    page(start, onesize, iter->loaded, iter->modified);
-      mplist.push_back(page);
+  // parse by max pagesize
+  dlpages    = parse_partsize_fdpage_list(dlpages, max_partsize);
+  mixuppages = parse_partsize_fdpage_list(mixuppages, max_partsize);
 
-      start     += onesize;
-      remains   -= onesize;
-    }
-  }
   return true;
 }
 
@@ -828,7 +1001,7 @@ bool PageList::ClearAllModified()
   return Compress();
 }
 
-bool PageList::Serialize(CacheFileStat& file, bool is_output)
+bool PageList::Serialize(CacheFileStat& file, bool is_output, ino_t inode)
 {
   if(!file.Open()){
     return false;
@@ -838,12 +1011,16 @@ bool PageList::Serialize(CacheFileStat& file, bool is_output)
     // put to file
     //
     ostringstream ssall;
-    ssall << Size();
+    ssall << inode << ":" << Size();
 
     for(fdpage_list_t::iterator iter = pages.begin(); iter != pages.end(); ++iter){
       ssall << "\n" << iter->offset << ":" << iter->bytes << ":" << (iter->loaded ? "1" : "0") << ":" << (iter->modified ? "1" : "0");
     }
 
+    if(-1 == ftruncate(file.GetFd(), 0)){
+      S3FS_PRN_ERR("failed to truncate file(to 0) for stats(%d)", errno);
+      return false;
+    }
     string strall = ssall.str();
     if(0 >= pwrite(file.GetFd(), strall.c_str(), strall.length(), 0)){
       S3FS_PRN_ERR("failed to write stats(%d)", errno);
@@ -879,13 +1056,46 @@ bool PageList::Serialize(CacheFileStat& file, bool is_output)
     // loaded
     Clear();
 
-    // load(size)
+    // load head line(for size and inode)
+    off_t total;
+    ino_t cache_inode;                  // if this value is 0, it means old format.
     if(!getline(ssall, oneline, '\n')){
       S3FS_PRN_ERR("failed to parse stats.");
       delete[] ptmp;
       return false;
+    }else{
+      istringstream sshead(oneline);
+      string        strhead1;
+      string        strhead2;
+
+      // get first part in head line.
+      if(!getline(sshead, strhead1, ':')){
+        S3FS_PRN_ERR("failed to parse stats.");
+        delete[] ptmp;
+        return false;
+      }
+      // get second part in head line.
+      if(!getline(sshead, strhead2, ':')){
+        // old head format is "<size>\n"
+        total       = cvt_strtoofft(strhead1.c_str(), /* base= */10);
+        cache_inode = 0;
+      }else{
+        // current head format is "<inode>:<size>\n"
+        total       = cvt_strtoofft(strhead2.c_str(), /* base= */10);
+        cache_inode = static_cast<ino_t>(cvt_strtoofft(strhead1.c_str(), /* base= */10));
+        if(0 == cache_inode){
+          S3FS_PRN_ERR("wrong inode number in parsed cache stats.");
+          delete[] ptmp;
+          return false;
+        }
+      }
     }
-    off_t total = s3fs_strtoofft(oneline.c_str());
+    // check inode number
+    if(0 != cache_inode && cache_inode != inode){
+      S3FS_PRN_ERR("differ inode and inode number in parsed cache stats.");
+      delete[] ptmp;
+      return false;
+    }
 
     // load each part
     bool is_err = false;
@@ -897,24 +1107,24 @@ bool PageList::Serialize(CacheFileStat& file, bool is_output)
         is_err = true;
         break;
       }
-      off_t offset = s3fs_strtoofft(part.c_str());
+      off_t offset = cvt_strtoofft(part.c_str(), /* base= */10);
       // size
       if(!getline(ssparts, part, ':')){
         is_err = true;
         break;
       }
-      off_t size = s3fs_strtoofft(part.c_str());
+      off_t size = cvt_strtoofft(part.c_str(), /* base= */10);
       // loaded
       if(!getline(ssparts, part, ':')){
         is_err = true;
         break;
       }
-      bool is_loaded = (1 == s3fs_strtoofft(part.c_str()) ? true : false);
+      bool is_loaded = (1 == cvt_strtoofft(part.c_str(), /* base= */10) ? true : false);
       bool is_modified;
       if(!getline(ssparts, part, ':')){
         is_modified = false;        // old version does not have this part.
       }else{
-        is_modified = (1 == s3fs_strtoofft(part.c_str()) ? true : false);
+        is_modified = (1 == cvt_strtoofft(part.c_str(), /* base= */10) ? true : false);
       }
       // add new area
       PageList::page_status pstatus = 
@@ -941,15 +1151,58 @@ bool PageList::Serialize(CacheFileStat& file, bool is_output)
   return true;
 }
 
-void PageList::Dump()
+void PageList::Dump() const
 {
   int cnt = 0;
 
   S3FS_PRN_DBG("pages = {");
-  for(fdpage_list_t::iterator iter = pages.begin(); iter != pages.end(); ++iter, ++cnt){
+  for(fdpage_list_t::const_iterator iter = pages.begin(); iter != pages.end(); ++iter, ++cnt){
     S3FS_PRN_DBG("  [%08d] -> {%014lld - %014lld : %s / %s}", cnt, static_cast<long long int>(iter->offset), static_cast<long long int>(iter->bytes), iter->loaded ? "loaded" : "unloaded", iter->modified ? "modified" : "not modified");
   }
   S3FS_PRN_DBG("}");
+}
+
+// 
+// Compare the fdpage_list_t pages of the object with the state of the file.
+// 
+// The loaded=true or modified=true area of pages must be a DATA block
+// (not a HOLE block) in the file.
+// The other area is a HOLE block in the file or is a DATA block(but the
+// data of the target area in that block should be ZERO).
+// If it is a bad area in the previous case, it will be reported as an error.
+// If the latter case does not match, it will be reported as a warning.
+// 
+bool PageList::CompareSparseFile(int fd, size_t file_size, fdpage_list_t& err_area_list, fdpage_list_t& warn_area_list)
+{
+  err_area_list.clear();
+  warn_area_list.clear();
+
+  // First, list the block disk allocation area of the cache file.
+  // The cache file has holes(sparse file) and no disk block areas
+  // are assigned to any holes.
+  fdpage_list_t sparse_list;
+  if(!PageList::GetSparseFilePages(fd, file_size, sparse_list)){
+    S3FS_PRN_ERR("Something error is occurred in parsing hole/data of the cache file(%d).", fd);
+
+    fdpage page(0, static_cast<off_t>(file_size), false, false);
+    err_area_list.push_back(page);
+
+    return false;
+  }
+
+  if(sparse_list.empty() && pages.empty()){
+    // both file and stats information are empty, it means cache file size is ZERO.
+    return true;
+  }
+
+  // Compare each pages and sparse_list
+  bool result = true;
+  for(fdpage_list_t::const_iterator iter = pages.begin(); iter != pages.end(); ++iter){
+    if(!PageList::CheckAreaInSparseFile(*iter, sparse_list, fd, err_area_list, warn_area_list)){
+      result = false;
+    }
+  }
+  return result;
 }
 
 //------------------------------------------------
@@ -978,26 +1231,51 @@ int FdEntity::FillFile(int fd, unsigned char byte, off_t size, off_t start)
   return 0;
 }
 
+// [NOTE]
+// If fd is wrong or something error is occurred, return 0.
+// The ino_t is allowed zero, but inode 0 is not realistic.
+// So this method returns 0 on error assuming the correct
+// inode is never 0.
+// The caller must have exclusive control.
+//
+ino_t FdEntity::GetInode(int fd)
+{
+  if(-1 == fd){
+    S3FS_PRN_ERR("file descriptor is wrong.");
+    return 0;
+  }
+
+  struct stat st;
+  if(0 != fstat(fd, &st)){
+    S3FS_PRN_ERR("could not get stat for file descriptor(%d) by errno(%d).", fd, errno);
+    return 0;
+  }
+  return st.st_ino;
+}
+
 //------------------------------------------------
 // FdEntity methods
 //------------------------------------------------
 FdEntity::FdEntity(const char* tpath, const char* cpath)
         : is_lock_init(false), refcnt(0), path(SAFESTRPTR(tpath)),
-          fd(-1), pfile(NULL), size_orgmeta(0), upload_id(""), mp_start(0), mp_size(0),
+          fd(-1), pfile(NULL), inode(0), size_orgmeta(0), upload_id(""), mp_start(0), mp_size(0),
           cachepath(SAFESTRPTR(cpath)), mirrorpath("")
 {
-  try{
-    pthread_mutexattr_t attr;
-    pthread_mutexattr_init(&attr);
+  pthread_mutexattr_t attr;
+  pthread_mutexattr_init(&attr);
 #if S3FS_PTHREAD_ERRORCHECK
-    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK);
+  pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK);
 #endif
-    pthread_mutex_init(&fdent_lock, &attr);
-    pthread_mutex_init(&fdent_data_lock, &attr);
-    is_lock_init = true;
-  }catch(exception& e){
-    S3FS_PRN_CRIT("failed to init mutex");
+  int res;
+  if(0 != (res = pthread_mutex_init(&fdent_lock, &attr))){
+    S3FS_PRN_CRIT("failed to init fdent_lock: %d", res);
+    abort();
   }
+  if(0 != (res = pthread_mutex_init(&fdent_data_lock, &attr))){
+    S3FS_PRN_CRIT("failed to init fdent_data_lock: %d", res);
+    abort();
+  }
+  is_lock_init = true;
 }
 
 FdEntity::~FdEntity()
@@ -1005,11 +1283,14 @@ FdEntity::~FdEntity()
   Clear();
 
   if(is_lock_init){
-    try{
-      pthread_mutex_destroy(&fdent_data_lock);
-      pthread_mutex_destroy(&fdent_lock);
-    }catch(exception& e){
-      S3FS_PRN_CRIT("failed to destroy mutex");
+    int res;
+    if(0 != (res = pthread_mutex_destroy(&fdent_data_lock))){
+      S3FS_PRN_CRIT("failed to destroy fdent_data_lock: %d", res);
+      abort();
+    }
+    if(0 != (res = pthread_mutex_destroy(&fdent_lock))){
+      S3FS_PRN_CRIT("failed to destroy fdent_lock: %d", res);
+      abort();
     }
     is_lock_init = false;
   }
@@ -1022,16 +1303,25 @@ void FdEntity::Clear()
 
   if(-1 != fd){
     if(!cachepath.empty()){
-      CacheFileStat cfstat(path.c_str());
-      if(!pagelist.Serialize(cfstat, true)){
-        S3FS_PRN_WARN("failed to save cache stat file(%s).", path.c_str());
+      // [NOTE]
+      // Compare the inode of the existing cache file with the inode of
+      // the cache file output by this object, and if they are the same,
+      // serialize the pagelist.
+      //
+      ino_t cur_inode = GetInode();
+      if(0 != cur_inode && cur_inode == inode){
+        CacheFileStat cfstat(path.c_str());
+        if(!pagelist.Serialize(cfstat, true, inode)){
+          S3FS_PRN_WARN("failed to save cache stat file(%s).", path.c_str());
+        }
       }
     }
     if(pfile){
       fclose(pfile);
       pfile = NULL;
     }
-    fd = -1;
+    fd    = -1;
+    inode = 0;
 
     if(!mirrorpath.empty()){
       if(-1 == unlink(mirrorpath.c_str())){
@@ -1044,6 +1334,26 @@ void FdEntity::Clear()
   refcnt        = 0;
   path          = "";
   cachepath     = "";
+}
+
+// [NOTE]
+// This method returns the inode of the file in cachepath.
+// The return value is the same as the class method GetInode().
+// The caller must have exclusive control.
+//
+ino_t FdEntity::GetInode()
+{
+  if(cachepath.empty()){
+    S3FS_PRN_INFO("cache file path is empty, then return inode as 0.");
+    return 0;
+  }
+
+  struct stat st;
+  if(0 != stat(cachepath.c_str(), &st)){
+    S3FS_PRN_INFO("could not get stat for file(%s) by errno(%d).", cachepath.c_str(), errno);
+    return 0;
+  }
+  return st.st_ino;
 }
 
 void FdEntity::Close()
@@ -1063,16 +1373,25 @@ void FdEntity::Close()
     if(0 == refcnt){
       AutoLock auto_data_lock(&fdent_data_lock);
       if(!cachepath.empty()){
-        CacheFileStat cfstat(path.c_str());
-        if(!pagelist.Serialize(cfstat, true)){
-          S3FS_PRN_WARN("failed to save cache stat file(%s).", path.c_str());
+        // [NOTE]
+        // Compare the inode of the existing cache file with the inode of
+        // the cache file output by this object, and if they are the same,
+        // serialize the pagelist.
+        //
+        ino_t cur_inode = GetInode();
+        if(0 != cur_inode && cur_inode == inode){
+          CacheFileStat cfstat(path.c_str());
+          if(!pagelist.Serialize(cfstat, true, inode)){
+            S3FS_PRN_WARN("failed to save cache stat file(%s).", path.c_str());
+          }
         }
       }
       if(pfile){
         fclose(pfile);
         pfile = NULL;
       }
-      fd = -1;
+      fd    = -1;
+      inode = 0;
 
       if(!mirrorpath.empty()){
         if(-1 == unlink(mirrorpath.c_str())){
@@ -1161,10 +1480,9 @@ int FdEntity::Open(headers_t* pmeta, off_t size, time_t time, bool no_fd_lock_wa
 
   if (!auto_lock.isLockAcquired()) {
     // had to wait for fd lock, return
+    S3FS_PRN_ERR("Could not get lock.");
     return -EIO;
   }
-
-  S3FS_PRN_DBG("[path=%s][fd=%d][size=%lld][time=%lld]", path.c_str(), fd, static_cast<long long>(size), static_cast<long long>(time));
 
   AutoLock auto_data_lock(&fdent_data_lock);
   if(-1 != fd){
@@ -1182,7 +1500,7 @@ int FdEntity::Open(headers_t* pmeta, off_t size, time_t time, bool no_fd_lock_wa
         return -EIO;
       }
       // resize page list
-      if(!pagelist.Resize(size, false, false)){
+      if(!pagelist.Resize(size, false, true)){      // Areas with increased size are modified
         S3FS_PRN_ERR("failed to truncate temporary file information(%d).", fd);
         if(0 < refcnt){
           refcnt--;
@@ -1222,24 +1540,28 @@ int FdEntity::Open(headers_t* pmeta, off_t size, time_t time, bool no_fd_lock_wa
     CacheFileStat cfstat(path.c_str());
 
     // try to open cache file
-    if(-1 != (fd = open(cachepath.c_str(), O_RDWR)) && pagelist.Serialize(cfstat, false)){
+    if( -1 != (fd = open(cachepath.c_str(), O_RDWR)) &&
+        0 != (inode = FdEntity::GetInode(fd))        &&
+        pagelist.Serialize(cfstat, false, inode)     )
+    {
       // succeed to open cache file and to load stats data
       memset(&st, 0, sizeof(struct stat));
       if(-1 == fstat(fd, &st)){
         S3FS_PRN_ERR("fstat is failed. errno(%d)", errno);
-        fd = -1;
+        fd    = -1;
+        inode = 0;
         return (0 == errno ? -EIO : -errno);
       }
       // check size, st_size, loading stat file
       if(-1 == size){
         if(st.st_size != pagelist.Size()){
-          pagelist.Resize(st.st_size, false, false);
+          pagelist.Resize(st.st_size, false, true); // Areas with increased size are modified
           need_save_csf = true;     // need to update page info
         }
         size = st.st_size;
       }else{
         if(size != pagelist.Size()){
-          pagelist.Resize(size, false, false);
+          pagelist.Resize(size, false, true);       // Areas with increased size are modified
           need_save_csf = true;     // need to update page info
         }
         if(size != st.st_size){
@@ -1248,17 +1570,39 @@ int FdEntity::Open(headers_t* pmeta, off_t size, time_t time, bool no_fd_lock_wa
       }
 
     }else{
+      if(-1 != fd){
+        close(fd);
+      }
+      inode = 0;
+
       // could not open cache file or could not load stats data, so initialize it.
       if(-1 == (fd = open(cachepath.c_str(), O_CREAT|O_RDWR|O_TRUNC, 0600))){
         S3FS_PRN_ERR("failed to open file(%s). errno(%d)", cachepath.c_str(), errno);
+
+        // remove cache stat file if it is existed
+        if(!CacheFileStat::DeleteCacheFileStat(path.c_str())){
+          if(ENOENT != errno){
+            S3FS_PRN_WARN("failed to delete current cache stat file(%s) by errno(%d), but continue...", path.c_str(), errno);
+          }
+        }
         return (0 == errno ? -EIO : -errno);
       }
       need_save_csf = true;       // need to update page info
+      inode         = FdEntity::GetInode(fd);
       if(-1 == size){
         size = 0;
         pagelist.Init(0, false, false);
       }else{
-        pagelist.Resize(size, false, false);
+        // [NOTE]
+        // The modify flag must not be set when opening a file,
+        // if the time parameter(mtime) is specified(not -1) and
+        // the cache file does not exist.
+        // If mtime is specified for the file and the cache file
+        // mtime is older than it, the cache file is removed and
+        // the processing comes here.
+        //
+        pagelist.Resize(size, false, (0 <= time ? false : true));
+
         is_truncate = true;
       }
     }
@@ -1277,12 +1621,14 @@ int FdEntity::Open(headers_t* pmeta, off_t size, time_t time, bool no_fd_lock_wa
     if(NULL == (pfile = fdopen(fd, "wb"))){
       S3FS_PRN_ERR("failed to get fileno(%s). errno(%d)", cachepath.c_str(), errno);
       close(fd);
-      fd = -1;
+      fd    = -1;
+      inode = 0;
       return (0 == errno ? -EIO : -errno);
     }
 
   }else{
     // not using cache
+    inode = 0;
 
     // open temporary file
     if(NULL == (pfile = tmpfile()) || -1 ==(fd = fileno(pfile))){
@@ -1297,7 +1643,15 @@ int FdEntity::Open(headers_t* pmeta, off_t size, time_t time, bool no_fd_lock_wa
       size = 0;
       pagelist.Init(0, false, false);
     }else{
-      pagelist.Resize(size, false, false);
+      // [NOTE]
+      // The modify flag must not be set when opening a file,
+      // if the time parameter(mtime) is specified(not -1) and
+      // the cache file does not exist.
+      // If mtime is specified for the file and the cache file
+      // mtime is older than it, the cache file is removed and
+      // the processing comes here.
+      //
+      pagelist.Resize(size, false, (0 <= time ? false : true));
       is_truncate = true;
     }
   }
@@ -1309,6 +1663,7 @@ int FdEntity::Open(headers_t* pmeta, off_t size, time_t time, bool no_fd_lock_wa
       fclose(pfile);
       pfile = NULL;
       fd    = -1;
+      inode = 0;
       return (0 == errno ? -EIO : -errno);
     }
   }
@@ -1316,7 +1671,7 @@ int FdEntity::Open(headers_t* pmeta, off_t size, time_t time, bool no_fd_lock_wa
   // reset cache stat file
   if(need_save_csf){
     CacheFileStat cfstat(path.c_str());
-    if(!pagelist.Serialize(cfstat, true)){
+    if(!pagelist.Serialize(cfstat, true, inode)){
       S3FS_PRN_WARN("failed to save cache stat file(%s), but continue...", path.c_str());
     }
   }
@@ -1340,6 +1695,7 @@ int FdEntity::Open(headers_t* pmeta, off_t size, time_t time, bool no_fd_lock_wa
       fclose(pfile);
       pfile = NULL;
       fd    = -1;
+      inode = 0;
       return (0 == errno ? -EIO : -errno);
     }
   }
@@ -1407,13 +1763,9 @@ bool FdEntity::RenamePath(const string& newpath, string& fentmapkey)
       return false;
     }
 
-    // link and unlink cache file
-    if(-1 == link(cachepath.c_str(), newcachepath.c_str())){
-      S3FS_PRN_ERR("failed to link old cache path(%s) to new cache path(%s) by errno(%d).", cachepath.c_str(), newcachepath.c_str(), errno);
-      return false;
-    }
-    if(-1 == unlink(cachepath.c_str())){
-      S3FS_PRN_ERR("failed to unlink old cache path(%s) by errno(%d).", cachepath.c_str(), errno);
+    // rename cache file
+    if(-1 == rename(cachepath.c_str(), newcachepath.c_str())){
+      S3FS_PRN_ERR("failed to rename old cache path(%s) to new cache path(%s) by errno(%d).", cachepath.c_str(), newcachepath.c_str(), errno);
       return false;
     }
 
@@ -1589,7 +1941,7 @@ bool FdEntity::SetAllStatus(bool is_loaded)
   return true;
 }
 
-int FdEntity::Load(off_t start, off_t size, bool lock_already_held)
+int FdEntity::Load(off_t start, off_t size, bool lock_already_held, bool is_modified_flag)
 {
   AutoLock auto_lock(&fdent_lock, lock_already_held ? AutoLock::ALREADY_LOCKED : AutoLock::NONE);
 
@@ -1634,7 +1986,7 @@ int FdEntity::Load(off_t start, off_t size, bool lock_already_held)
         break;
       }
       // Set loaded flag
-      pagelist.SetPageLoadedStatus(iter->offset, iter->bytes, PageList::PAGE_LOADED);
+      pagelist.SetPageLoadedStatus(iter->offset, iter->bytes, (is_modified_flag ? PageList::PAGE_LOAD_MODIFIED : PageList::PAGE_LOADED));
     }
     PageList::FreeList(unloaded_list);
   }
@@ -1925,7 +2277,6 @@ int FdEntity::RowFlush(const char* tpath, bool force_sync)
 
   if(0 == upload_id.length()){
     // normal uploading
-
     /*
      * Make decision to do multi upload (or not) based upon file size
      * 
@@ -1965,19 +2316,23 @@ int FdEntity::RowFlush(const char* tpath, bool force_sync)
         // This is to ensure that each part is 5MB or more.
         // If the part is less than 5MB, download it.
         fdpage_list_t dlpages;
-        if(!pagelist.GetLoadPageListForMultipartUpload(dlpages)){
+        fdpage_list_t mixuppages;
+        if(!pagelist.GetPageListsForMultipartUpload(dlpages, mixuppages, S3fsCurl::GetMultipartSize())){
           S3FS_PRN_ERR("something error occurred during getting download pagelist.");
           return -1;
         }
+
+        // [TODO] should use parallel downloading
+        //
         for(fdpage_list_t::const_iterator iter = dlpages.begin(); iter != dlpages.end(); ++iter){
-          if(0 != (result = Load(iter->offset, iter->bytes, true))){
+          if(0 != (result = Load(iter->offset, iter->bytes, /*lock_already_held=*/ true, /*is_modified_flag=*/ true))){  // set loaded and modified flag
             S3FS_PRN_ERR("failed to get parts(start=%lld, size=%lld) before uploading.", static_cast<long long int>(iter->offset), static_cast<long long int>(iter->bytes));
             return result;
           }
         }
 
         // multipart uploading with copy api
-        result = S3fsCurl::ParallelMixMultipartUploadRequest(tpath ? tpath : tmppath.c_str(), tmporgmeta, fd, pagelist);
+        result = S3fsCurl::ParallelMixMultipartUploadRequest(tpath ? tpath : tmppath.c_str(), tmporgmeta, fd, mixuppages);
 
       }else{
         // multipart uploading not using copy api
@@ -2002,7 +2357,6 @@ int FdEntity::RowFlush(const char* tpath, bool force_sync)
 
     // reset uploaded file size
     size_orgmeta = st.st_size;
-
   }else{
     // upload rest data
     if(0 < mp_size){
@@ -2252,6 +2606,7 @@ bool            FdManager::is_lock_init(false);
 string          FdManager::cache_dir;
 bool            FdManager::check_cache_dir_exist(false);
 off_t           FdManager::free_disk_space = 0;
+std::string     FdManager::check_cache_output;
 
 //------------------------------------------------
 // FdManager class methods
@@ -2262,6 +2617,16 @@ bool FdManager::SetCacheDir(const char* dir)
     cache_dir = "";
   }else{
     cache_dir = dir;
+  }
+  return true;
+}
+
+bool FdManager::SetCacheCheckOutput(const char* path)
+{
+  if(!path || '\0' == path[0]){
+    check_cache_output.erase();
+  }else{
+    check_cache_output = path;
   }
   return true;
 }
@@ -2462,15 +2827,20 @@ FdManager::FdManager()
 #if S3FS_PTHREAD_ERRORCHECK
     pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK);
 #endif
-    try{
-      pthread_mutex_init(&FdManager::fd_manager_lock, &attr);
-      pthread_mutex_init(&FdManager::cache_cleanup_lock, &attr);
-      pthread_mutex_init(&FdManager::reserved_diskspace_lock, &attr);
-      FdManager::is_lock_init = true;
-    }catch(exception& e){
-      FdManager::is_lock_init = false;
-      S3FS_PRN_CRIT("failed to init mutex");
+    int res;
+    if(0 != (res = pthread_mutex_init(&FdManager::fd_manager_lock, &attr))){
+      S3FS_PRN_CRIT("failed to init fd_manager_lock: %d", res);
+      abort();
     }
+    if(0 != (res = pthread_mutex_init(&FdManager::cache_cleanup_lock, &attr))){
+      S3FS_PRN_CRIT("failed to init cache_cleanup_lock: %d", res);
+      abort();
+    }
+    if(0 != (res = pthread_mutex_init(&FdManager::reserved_diskspace_lock, &attr))){
+      S3FS_PRN_CRIT("failed to init reserved_diskspace_lock: %d", res);
+      abort();
+    }
+    FdManager::is_lock_init = true;
   }else{
     abort();
   }
@@ -2486,12 +2856,18 @@ FdManager::~FdManager()
     fent.clear();
 
     if(FdManager::is_lock_init){
-      try{
-        pthread_mutex_destroy(&FdManager::fd_manager_lock);
-        pthread_mutex_destroy(&FdManager::cache_cleanup_lock);
-        pthread_mutex_destroy(&FdManager::reserved_diskspace_lock);
-      }catch(exception& e){
-        S3FS_PRN_CRIT("failed to init mutex");
+      int res;
+      if(0 != (res = pthread_mutex_destroy(&FdManager::fd_manager_lock))){
+        S3FS_PRN_CRIT("failed to destroy fd_manager_lock: %d", res);
+        abort();
+      }
+      if(0 != (res = pthread_mutex_destroy(&FdManager::cache_cleanup_lock))){
+        S3FS_PRN_CRIT("failed to destroy cache_cleanup_lock: %d", res);
+        abort();
+      }
+      if(0 != (res = pthread_mutex_destroy(&FdManager::reserved_diskspace_lock))){
+        S3FS_PRN_CRIT("failed to destroy reserved_diskspace_lock: %d", res);
+        abort();
       }
       FdManager::is_lock_init = false;
     }
@@ -2670,7 +3046,7 @@ void FdManager::Rename(const std::string &from, const std::string &to)
     // rename path and caches in fd entity
     string fentmapkey;
     if(!ent->RenamePath(to, fentmapkey)){
-      S3FS_PRN_ERR("Failed to rename FdEntity obejct for %s to %s", from.c_str(), to.c_str());
+      S3FS_PRN_ERR("Failed to rename FdEntity object for %s to %s", from.c_str(), to.c_str());
       return;
     }
 
@@ -2807,6 +3183,227 @@ void FdManager::FreeReservedDiskSpace(off_t size)
 {
   AutoLock auto_lock(&FdManager::reserved_diskspace_lock);
   free_disk_space -= size;
+}
+
+//
+// Inspect all files for stats file for cache file
+// 
+// [NOTE]
+// The minimum sub_path parameter is "/".
+// The sub_path is a directory path starting from "/" and ending with "/".
+//
+// This method produces the following output.
+//
+// * Header
+//    ------------------------------------------------------------
+//    Check cache file and its stats file consistency
+//    ------------------------------------------------------------
+// * When the cache file and its stats information match
+//    File path: <file path> -> [OK] no problem
+//
+// * If there is a problem with the cache file and its stats information
+//    File path: <file path>
+//      -> [P] <If the problem is that parsing is not possible in the first place, the message is output here with this prefix.>
+//      -> [E] there is a mark that data exists in stats, but there is no data in the cache file.
+//             <offset address>(bytes)
+//                 ...
+//                 ...
+//      -> [W] These show no data in stats, but there is evidence of data in the cache file.(no problem.)
+//             <offset address>(bytes)
+//                 ...
+//                 ...
+//
+bool FdManager::RawCheckAllCache(FILE* fp, const char* cache_stat_top_dir, const char* sub_path, int& total_file_cnt, int& err_file_cnt, int& err_dir_cnt)
+{
+  if(!cache_stat_top_dir || '\0' == cache_stat_top_dir[0] || !sub_path || '\0' == sub_path[0]){
+    S3FS_PRN_ERR("Parameter cache_stat_top_dir is empty.");
+    return false;
+  }
+
+  // allocate dirent buffer
+  long name_max = pathconf(cache_stat_top_dir, _PC_NAME_MAX);
+  if(-1 == name_max){
+    name_max = 255;     // [NOTE] Is PATH_MAX better?
+  }
+  size_t structlen = offsetof(struct dirent, d_name) + name_max + 1;
+  struct dirent* pdirent;
+  if(NULL == (pdirent = reinterpret_cast<struct dirent*>(malloc(structlen)))){
+    S3FS_PRN_ERR("Could not allocate memory for dirent(length = %zu) by errno(%d)", structlen, errno);
+    return false;
+  }
+
+  // open directory of cache file's stats
+  DIR*   statsdir;
+  string target_dir = cache_stat_top_dir;
+  target_dir       += sub_path;
+  if(NULL == (statsdir = opendir(target_dir.c_str()))){
+    S3FS_PRN_ERR("Could not open directory(%s) by errno(%d)", target_dir.c_str(), errno);
+    free(pdirent);
+    return false;
+  }
+
+  // loop in directory of cache file's stats
+  struct dirent* pdirent_res = NULL;
+  int            result;
+  for(result = readdir_r(statsdir, pdirent, &pdirent_res); 0 == result && pdirent_res; result = readdir_r(statsdir, pdirent, &pdirent_res)){
+    if(DT_DIR == pdirent_res->d_type){
+      // found directory
+      if(0 == strcmp(pdirent_res->d_name, ".") || 0 == strcmp(pdirent_res->d_name, "..")){
+        continue;
+      }
+
+      // reentrant for sub directory
+      string subdir_path = sub_path;
+      subdir_path       += pdirent_res->d_name;
+      subdir_path       += '/';
+      if(!RawCheckAllCache(fp, cache_stat_top_dir, subdir_path.c_str(), total_file_cnt, err_file_cnt, err_dir_cnt)){
+        // put error message for this dir.
+        ++err_dir_cnt;
+        S3FS_PRN_CACHE(fp, CACHEDBG_FMT_DIR_PROB, subdir_path.c_str());
+        S3FS_PRN_CACHE(fp, CACHEDBG_FMT_CRIT_HEAD, "Something error is occurred in checking this directory");
+      }
+
+    }else{
+      ++total_file_cnt;
+
+      // make cache file path
+      string strOpenedWarn;
+      string cache_path;
+      string object_file_path = sub_path;
+      object_file_path       += pdirent_res->d_name;
+      if(!FdManager::MakeCachePath(object_file_path.c_str(), cache_path, false, false) || cache_path.empty()){
+        ++err_file_cnt;
+        S3FS_PRN_CACHE(fp, CACHEDBG_FMT_FILE_PROB, object_file_path.c_str(), strOpenedWarn.c_str());
+        S3FS_PRN_CACHE(fp, CACHEDBG_FMT_CRIT_HEAD, "Could not make cache file path");
+        continue;
+      }
+
+      // check if the target file is currently in operation.
+      {
+        AutoLock auto_lock(&FdManager::fd_manager_lock);
+
+        fdent_map_t::iterator iter = fent.find(object_file_path);
+        if(fent.end() != iter){
+          // This file is opened now, then we need to put warning message.
+          strOpenedWarn = CACHEDBG_FMT_WARN_OPEN;
+        }
+      }
+
+      // open cache file
+      int cache_file_fd;
+      if(-1 == (cache_file_fd = open(cache_path.c_str(), O_RDONLY))){
+        ++err_file_cnt;
+        S3FS_PRN_CACHE(fp, CACHEDBG_FMT_FILE_PROB, object_file_path.c_str(), strOpenedWarn.c_str());
+        S3FS_PRN_CACHE(fp, CACHEDBG_FMT_CRIT_HEAD, "Could not open cache file");
+        continue;
+      }
+
+      // get inode number for cache file
+      struct stat st;
+      if(0 != fstat(cache_file_fd, &st)){
+        ++err_file_cnt;
+        S3FS_PRN_CACHE(fp, CACHEDBG_FMT_FILE_PROB, object_file_path.c_str(), strOpenedWarn.c_str());
+        S3FS_PRN_CACHE(fp, CACHEDBG_FMT_CRIT_HEAD, "Could not get file inode number for cache file");
+
+        close(cache_file_fd);
+        continue;
+      }
+      ino_t cache_file_inode = st.st_ino;
+
+      // open cache stat file and load page info.
+      PageList      pagelist;
+      CacheFileStat cfstat(object_file_path.c_str());
+      if(!cfstat.ReadOnlyOpen() || !pagelist.Serialize(cfstat, false, cache_file_inode)){
+        ++err_file_cnt;
+        S3FS_PRN_CACHE(fp, CACHEDBG_FMT_FILE_PROB, object_file_path.c_str(), strOpenedWarn.c_str());
+        S3FS_PRN_CACHE(fp, CACHEDBG_FMT_CRIT_HEAD, "Could not load cache file stats information");
+
+        close(cache_file_fd);
+        continue;
+      }
+      cfstat.Release();
+
+      // compare cache file size and stats information
+      if(st.st_size != pagelist.Size()){
+        ++err_file_cnt;
+        S3FS_PRN_CACHE(fp, CACHEDBG_FMT_FILE_PROB, object_file_path.c_str(), strOpenedWarn.c_str());
+        S3FS_PRN_CACHE(fp, CACHEDBG_FMT_CRIT_HEAD2 "The cache file size(%lld) and the value(%lld) from cache file stats are different", static_cast<long long int>(st.st_size), static_cast<long long int>(pagelist.Size()));
+
+        close(cache_file_fd);
+        continue;
+      }
+
+      // compare cache file stats and cache file blocks
+      fdpage_list_t err_area_list;
+      fdpage_list_t warn_area_list;
+      if(!pagelist.CompareSparseFile(cache_file_fd, st.st_size, err_area_list, warn_area_list)){
+        // Found some error or warning
+        S3FS_PRN_CACHE(fp, CACHEDBG_FMT_FILE_PROB, object_file_path.c_str(), strOpenedWarn.c_str());
+        if(!warn_area_list.empty()){
+          S3FS_PRN_CACHE(fp, CACHEDBG_FMT_WARN_HEAD);
+          for(fdpage_list_t::const_iterator witer = warn_area_list.begin(); witer != warn_area_list.end(); ++witer){
+            S3FS_PRN_CACHE(fp, CACHEDBG_FMT_PROB_BLOCK, (intmax_t)(witer->offset), (intmax_t)(witer->bytes));
+          }
+        }
+        if(!err_area_list.empty()){
+          ++err_file_cnt;
+          S3FS_PRN_CACHE(fp, CACHEDBG_FMT_ERR_HEAD);
+          for(fdpage_list_t::const_iterator eiter = err_area_list.begin(); eiter != err_area_list.end(); ++eiter){
+            S3FS_PRN_CACHE(fp, CACHEDBG_FMT_PROB_BLOCK, (intmax_t)(eiter->offset), (intmax_t)(eiter->bytes));
+          }
+        }
+      }else{
+        // There is no problem!
+        if(!strOpenedWarn.empty()){
+          strOpenedWarn += "\n ";
+        }
+        S3FS_PRN_CACHE(fp, CACHEDBG_FMT_FILE_OK, object_file_path.c_str(), strOpenedWarn.c_str());
+      }
+      err_area_list.clear();
+      warn_area_list.clear();
+      close(cache_file_fd);
+    }
+  }
+
+  closedir(statsdir);
+  free(pdirent);
+
+  return true;
+}
+
+bool FdManager::CheckAllCache()
+{
+  FILE* fp;
+  if(FdManager::check_cache_output.empty()){
+    fp = stdout;
+  }else{
+    if(NULL == (fp = fopen(FdManager::check_cache_output.c_str(), "a+"))){
+      S3FS_PRN_ERR("Could not open(create) output file(%s) for checking all cache by errno(%d)", FdManager::check_cache_output.c_str(), errno);
+      return false;
+    }
+  }
+
+  // print head message
+  S3FS_PRN_CACHE(fp, CACHEDBG_FMT_HEAD);
+
+  // Loop in directory of cache file's stats
+  string top_path       = CacheFileStat::GetCacheFileStatTopDir();
+  int    total_file_cnt = 0;
+  int    err_file_cnt   = 0;
+  int    err_dir_cnt    = 0;
+  bool   result         = RawCheckAllCache(fp, top_path.c_str(), "/", total_file_cnt, err_file_cnt, err_dir_cnt);
+  if(!result){
+    S3FS_PRN_ERR("Processing failed due to some problem.");
+  }
+
+  // print foot message
+  S3FS_PRN_CACHE(fp, CACHEDBG_FMT_FOOT, total_file_cnt, err_file_cnt, err_dir_cnt);
+
+  if(stdout != fp){
+    fclose(fp);
+  }
+
+  return result;
 }
 
 /*

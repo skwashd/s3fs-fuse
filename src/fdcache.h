@@ -21,7 +21,6 @@
 #define FD_CACHE_H_
 
 #include <sys/statvfs.h>
-#include "curl.h"
 
 //------------------------------------------------
 // CacheFileStat
@@ -35,7 +34,10 @@ class CacheFileStat
   private:
     static bool MakeCacheFileStatPath(const char* path, std::string& sfile_path, bool is_create_dir = true);
 
+    bool RawOpen(bool readonly);
+
   public:
+    static std::string GetCacheFileStatTopDir(void);
     static bool DeleteCacheFileStat(const char* path);
     static bool CheckCacheFileStatTopDir(void);
     static bool DeleteCacheFileStatDirectory(void);
@@ -45,6 +47,7 @@ class CacheFileStat
     ~CacheFileStat();
 
     bool Open(void);
+    bool ReadOnlyOpen(void);
     bool Release(void);
     bool SetPath(const char* tpath, bool is_open = true);
     int GetFd(void) const { return fd; }
@@ -91,10 +94,13 @@ class PageList
     };
 
   private:
+    static bool GetSparseFilePages(int fd, size_t file_size, fdpage_list_t& sparse_list);
+    static bool CheckZeroAreaInFile(int fd, off_t start, size_t bytes);
+    static bool CheckAreaInSparseFile(const struct fdpage& checkpage, const fdpage_list_t& sparse_list, int fd, fdpage_list_t& err_area_list, fdpage_list_t& warn_area_list);
+
     void Clear(void);
-    bool Compress(bool force_modified = false);
+    bool Compress();
     bool Parse(off_t new_pos);
-    bool RawGetUnloadPageList(fdpage_list_t& dlpages, off_t offset, off_t size);
 
   public:
     static void FreeList(fdpage_list_t& list);
@@ -112,14 +118,14 @@ class PageList
     bool FindUnloadedPage(off_t start, off_t& resstart, off_t& ressize) const;
     off_t GetTotalUnloadedPageSize(off_t start = 0, off_t size = 0) const;    // size=0 is checking to end of list
     int GetUnloadedPages(fdpage_list_t& unloaded_list, off_t start = 0, off_t size = 0) const;  // size=0 is checking to end of list
-    bool GetLoadPageListForMultipartUpload(fdpage_list_t& dlpages);
-    bool GetMultipartSizeList(fdpage_list_t& mplist, off_t partsize) const;
+    bool GetPageListsForMultipartUpload(fdpage_list_t& dlpages, fdpage_list_t& mixuppages, off_t max_partsize);
 
     bool IsModified(void) const;
     bool ClearAllModified(void);
 
-    bool Serialize(CacheFileStat& file, bool is_output);
-    void Dump(void);
+    bool Serialize(CacheFileStat& file, bool is_output, ino_t inode);
+    void Dump(void) const;
+    bool CompareSparseFile(int fd, size_t file_size, fdpage_list_t& err_area_list, fdpage_list_t& warn_area_list);
 };
 
 //------------------------------------------------
@@ -136,6 +142,7 @@ class FdEntity
     std::string     path;           // object path
     int             fd;             // file descriptor(tmp file or cache file)
     FILE*           pfile;          // file pointer(tmp file or cache file)
+    ino_t           inode;          // inode number for cache file
     headers_t       orgmeta;        // original headers at opening
     off_t           size_orgmeta;   // original file size in original headers
 
@@ -151,8 +158,10 @@ class FdEntity
 
   private:
     static int FillFile(int fd, unsigned char byte, off_t size, off_t start);
+    static ino_t GetInode(int fd);
 
     void Clear(void);
+    ino_t GetInode(void);
     int OpenMirrorFile(void);
     bool SetAllStatus(bool is_loaded);                          // [NOTE] not locking
     //bool SetAllStatusLoaded(void) { return SetAllStatus(true); }
@@ -186,7 +195,7 @@ class FdEntity
     bool SetGId(gid_t gid);
     bool SetContentType(const char* path);
 
-    int Load(off_t start = 0, off_t size = 0, bool lock_already_held = false);  // size=0 means loading to end
+    int Load(off_t start = 0, off_t size = 0, bool lock_already_held = false, bool is_modified_flag = false);  // size=0 means loading to end
     int NoCacheLoadAndPost(off_t start = 0, off_t size = 0);   // size=0 means loading to end
     int NoCachePreMultipartPost(void);
     int NoCacheMultipartPost(int tgfd, off_t start, off_t size);
@@ -216,12 +225,14 @@ class FdManager
     static std::string     cache_dir;
     static bool            check_cache_dir_exist;
     static off_t           free_disk_space; // limit free disk space
+    static std::string     check_cache_output;
 
     fdent_map_t            fent;
 
   private:
     static off_t GetFreeDiskSpace(const char* path);
     void CleanupCacheDirInternal(const std::string &path = "");
+    bool RawCheckAllCache(FILE* fp, const char* cache_stat_top_dir, const char* sub_path, int& total_file_cnt, int& err_file_cnt, int& err_dir_cnt);
 
   public:
     FdManager();
@@ -233,8 +244,10 @@ class FdManager
     static bool DeleteCacheDirectory(void);
     static int DeleteCacheFile(const char* path);
     static bool SetCacheDir(const char* dir);
-    static bool IsCacheDir(void) { return (0 < FdManager::cache_dir.size()); }
+    static bool IsCacheDir(void) { return !FdManager::cache_dir.empty(); }
     static const char* GetCacheDir(void) { return FdManager::cache_dir.c_str(); }
+    static bool SetCacheCheckOutput(const char* path);
+    static const char* GetCacheCheckOutput(void) { return FdManager::check_cache_output.c_str(); }
     static bool MakeCachePath(const char* path, std::string& cache_path, bool is_create_dir = true, bool is_mirror_path = false);
     static bool CheckCacheTopDir(void);
     static bool MakeRandomTempPath(const char* path, std::string& tmppath);
@@ -255,6 +268,8 @@ class FdManager
     bool Close(FdEntity* ent);
     bool ChangeEntityToTempPath(FdEntity* ent, const char* path);
     void CleanupCacheDir();
+
+    bool CheckAllCache(void);
 };
 
 #endif // FD_CACHE_H_
