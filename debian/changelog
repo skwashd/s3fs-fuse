@@ -1,3 +1,9 @@
+s3fs-fuse (1.87-1~bpo10+1) buster-backports; urgency=medium
+
+  * Rebuild for buster-backports.
+
+ -- Mattia Rizzolo <mattia@debian.org>  Mon, 09 Nov 2020 13:51:00 +0100
+
 s3fs-fuse (1.87-1) unstable; urgency=medium
 
   * New upstream release 1.87.  LP: #1891124
