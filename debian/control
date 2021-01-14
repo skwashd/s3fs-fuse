@@ -12,7 +12,7 @@ Build-Depends:
  libgnutls28-dev,
  libxml2-dev,
  pkg-config,
-Standards-Version: 4.5.0
+Standards-Version: 4.5.1
 Homepage: https://github.com/s3fs-fuse/s3fs-fuse
 Vcs-Git: https://salsa.debian.org/debian/s3fs-fuse.git -b debian
 Vcs-Browser: https://salsa.debian.org/debian/s3fs-fuse
