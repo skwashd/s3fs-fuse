@@ -1,4 +1,23 @@
 #!/bin/bash
+#
+# s3fs - FUSE-based file system backed by Amazon S3
+#
+# Copyright 2007-2008 Randy Rizun <rrizun@gmail.com>
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+#
 
 #
 # Common code for starting an s3fs-fuse mountpoint and an S3Proxy instance 
@@ -12,8 +31,9 @@
 # TEST_BUCKET_1=bucketname           Name of bucket to use 
 # S3PROXY_BINARY=""                  Specify empty string to skip S3Proxy start
 # S3_URL="https://s3.amazonaws.com"  Specify Amazon AWS as the S3 provider
+# S3_ENDPOINT="us-east-1"             Specify region
 #
-# Example of running against Amazon S3 using a bucket named "bucket:
+# Example of running against Amazon S3 using a bucket named "bucket":
 #
 # S3FS_CREDENTIALS_FILE=keyfile TEST_BUCKET_1=bucket S3PROXY_BINARY="" S3_URL="https://s3.amazonaws.com" ./small-integration-test.sh
 #
@@ -45,16 +65,21 @@ S3FS=../src/s3fs
 
 # Allow these defaulted values to be overridden
 : ${S3_URL:="https://127.0.0.1:8080"}
+: ${S3_ENDPOINT:="us-east-1"}
 : ${S3FS_CREDENTIALS_FILE:="passwd-s3fs"}
 : ${TEST_BUCKET_1:="s3fs-integration-test"}
 
 export TEST_BUCKET_1
 export S3_URL
+export S3_ENDPOINT
 export TEST_SCRIPT_DIR=`pwd`
 export TEST_BUCKET_MOUNT_POINT_1=${TEST_BUCKET_1}
 
 S3PROXY_VERSION="1.7.1"
 S3PROXY_BINARY=${S3PROXY_BINARY-"s3proxy-${S3PROXY_VERSION}"}
+
+CHAOS_HTTP_PROXY_VERSION="1.1.0"
+CHAOS_HTTP_PROXY_BINARY="chaos-http-proxy-${CHAOS_HTTP_PROXY_VERSION}"
 
 if [ ! -f "$S3FS_CREDENTIALS_FILE" ]
 then
@@ -116,20 +141,25 @@ function start_s3proxy {
             chmod +x "${S3PROXY_BINARY}"
         fi
 
-        stdbuf -oL -eL java -jar "$S3PROXY_BINARY" --properties $S3PROXY_CONFIG &
+        ${STDBUF_BIN} -oL -eL java -jar "$S3PROXY_BINARY" --properties $S3PROXY_CONFIG &
         S3PROXY_PID=$!
 
         # wait for S3Proxy to start
-        for i in $(seq 30);
-        do
-            if exec 3<>"/dev/tcp/127.0.0.1/8080";
-            then
-                exec 3<&-  # Close for read
-                exec 3>&-  # Close for write
-                break
-            fi
-            sleep 1
-        done
+        wait_for_port 8080
+    fi
+
+    if [ -n "${CHAOS_HTTP_PROXY}" ]; then
+        if [ ! -e "${CHAOS_HTTP_PROXY_BINARY}" ]; then
+            wget "https://github.com/bouncestorage/chaos-http-proxy/releases/download/chaos-http-proxy-${CHAOS_HTTP_PROXY_VERSION}/chaos-http-proxy" \
+                --quiet -O "${CHAOS_HTTP_PROXY_BINARY}"
+            chmod +x "${CHAOS_HTTP_PROXY_BINARY}"
+        fi
+
+        ${STDBUF_BIN} -oL -eL java -jar ${CHAOS_HTTP_PROXY_BINARY} --properties chaos-http-proxy.conf &
+        CHAOS_HTTP_PROXY_PID=$!
+
+        # wait for Chaos HTTP Proxy to start
+        wait_for_port 1080
     fi
 }
 
@@ -137,6 +167,11 @@ function stop_s3proxy {
     if [ -n "${S3PROXY_PID}" ]
     then
         kill $S3PROXY_PID
+    fi
+
+    if [ -n "${CHAOS_HTTP_PROXY_PID}" ]
+    then
+        kill $CHAOS_HTTP_PROXY_PID
     fi
 }
 
@@ -167,6 +202,21 @@ function start_s3fs {
        DIRECT_IO_OPT=""
     fi
 
+    if [ -n "${CHAOS_HTTP_PROXY}" ]; then
+        export http_proxy="127.0.0.1:1080"
+    fi
+
+    # [NOTE]
+    # On macos, running s3fs via stdbuf will result in no response.
+    # Therefore, when it is macos, it is not executed via stdbuf.
+    # This patch may be temporary, but no other method has been found at this time.
+    #
+    if [ `uname` = "Darwin" ]; then
+        VIA_STDBUF_CMDLINE=""
+    else
+        VIA_STDBUF_CMDLINE="${STDBUF_BIN} -oL -eL"
+    fi
+
     # Common s3fs options:
     #
     # TODO: Allow all these options to be overridden with env variables
@@ -189,12 +239,13 @@ function start_s3fs {
     # subshell with set -x to log exact invocation of s3fs-fuse
     (
         set -x 
-        stdbuf -oL -eL \
+        ${VIA_STDBUF_CMDLINE} \
             ${VALGRIND_EXEC} ${S3FS} \
             $TEST_BUCKET_1 \
             $TEST_BUCKET_MOUNT_POINT_1 \
             -o use_path_request_style \
             -o url=${S3_URL} \
+            -o endpoint=${S3_ENDPOINT} \
             -o no_check_certificate \
             -o ssl_verify_hostname=0 \
             -o use_xattr=1 \
@@ -206,14 +257,17 @@ function start_s3fs {
             -o dbglevel=${DBGLEVEL:=info} \
             -o retries=3 \
             -f \
-            "${@}" | stdbuf -oL -eL sed $SED_BUFFER_FLAG "s/^/s3fs: /" &
-        S3FS_PID=$!
-    )
+            "${@}" &
+        echo $! >&3
+    ) 3>pid | ${STDBUF_BIN} -oL -eL ${SED_BIN} ${SED_BUFFER_FLAG} "s/^/s3fs: /" &
+    sleep 1
+    export S3FS_PID=$(<pid)
+    rm -f pid
 
     if [ `uname` = "Darwin" ]; then
          set +o errexit
          TRYCOUNT=0
-         while [ $TRYCOUNT -le 20 ]; do
+         while [ $TRYCOUNT -le ${RETRIES:=20} ]; do
              df | grep -q $TEST_BUCKET_MOUNT_POINT_1
              if [ $? -eq 0 ]; then
                  break;
@@ -226,7 +280,7 @@ function start_s3fs {
          fi
          set -o errexit
     else
-        retry 20 grep -q $TEST_BUCKET_MOUNT_POINT_1 /proc/mounts || exit 1
+        retry ${RETRIES:=20} grep -q $TEST_BUCKET_MOUNT_POINT_1 /proc/mounts || exit 1
     fi
 
     # Quick way to start system up for manual testing with options under test
@@ -246,7 +300,7 @@ function stop_s3fs {
         fi
     else
         if grep -q $TEST_BUCKET_MOUNT_POINT_1 /proc/mounts; then 
-            retry 10 grep -q $TEST_BUCKET_MOUNT_POINT_1 /proc/mounts && fusermount -u $TEST_BUCKET_MOUNT_POINT_1
+            retry 10 grep -q $TEST_BUCKET_MOUNT_POINT_1 /proc/mounts "&&" fusermount -u $TEST_BUCKET_MOUNT_POINT_1
         fi
     fi
 }
@@ -257,3 +311,12 @@ function common_exit_handler {
     stop_s3proxy
 }
 trap common_exit_handler EXIT
+
+#
+# Local variables:
+# tab-width: 4
+# c-basic-offset: 4
+# End:
+# vim600: expandtab sw=4 ts=4 fdm=marker
+# vim<600: expandtab sw=4 ts=4
+#

@@ -2,14 +2,14 @@
 
 s3fs allows Linux and macOS to mount an S3 bucket via FUSE.
 s3fs preserves the native object format for files, allowing use of other
-tools like [AWS CLI](https://github.com/aws/aws-cli).
-[![Build Status](https://travis-ci.org/s3fs-fuse/s3fs-fuse.svg?branch=master)](https://travis-ci.org/s3fs-fuse/s3fs-fuse)
+tools like [AWS CLI](https://github.com/aws/aws-cli).  
+[![s3fs-fuse CI](https://github.com/s3fs-fuse/s3fs-fuse/workflows/s3fs-fuse%20CI/badge.svg)](https://github.com/s3fs-fuse/s3fs-fuse/actions)
 [![Twitter Follow](https://img.shields.io/twitter/follow/s3fsfuse.svg?style=social&label=Follow)](https://twitter.com/s3fsfuse)
 
 ## Features
 
 * large subset of POSIX including reading/writing files, directories, symlinks, mode, uid/gid, and extended attributes
-* compatible with Amazon S3, Google Cloud Storage, and other S3-based object stores
+* compatible with Amazon S3, and other [S3-based object stores](https://github.com/s3fs-fuse/s3fs-fuse/wiki/Non-Amazon-S3)
 * allows random writes and appends
 * large files via multi-part upload
 * renames via server-side copy
@@ -71,7 +71,7 @@ Many systems provide pre-built packages:
 * macOS via [Homebrew](https://brew.sh/):
 
   ```
-  brew cask install osxfuse
+  brew install --cask osxfuse
   brew install s3fs
   ```
 
@@ -147,7 +147,7 @@ Generally S3 cannot offer the same performance or semantics as a local file syst
 
 * random writes or appends to files require rewriting the entire object, optimized with multi-part upload copy
 * metadata operations such as listing directories have poor performance due to network latency
-* [eventual consistency](https://en.wikipedia.org/wiki/Eventual_consistency) can temporarily yield stale data([Amazon S3 Data Consistency Model](https://docs.aws.amazon.com/AmazonS3/latest/dev/Introduction.html#ConsistencyModel))
+* non-AWS providers may have [eventual consistency](https://en.wikipedia.org/wiki/Eventual_consistency) so reads can temporarily yield stale data (AWS offers read-after-write consistency [since Dec 2020](https://aws.amazon.com/about-aws/whats-new/2020/12/amazon-s3-now-delivers-strong-read-after-write-consistency-automatically-for-all-applications/))
 * no atomic renames of files or directories
 * no coordination between multiple clients mounting the same bucket
 * no hard links

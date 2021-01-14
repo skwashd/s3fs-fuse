@@ -1,4 +1,23 @@
 #!/bin/bash
+#
+# s3fs - FUSE-based file system backed by Amazon S3
+#
+# Copyright 2007-2008 Randy Rizun <rrizun@gmail.com>
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+#
 
 set -o errexit
 set -o pipefail
@@ -41,7 +60,7 @@ function test_truncate_upload {
 
     rm_test_file ${BIG_FILE}
 
-    truncate ${BIG_FILE} -s ${BIG_FILE_LENGTH}
+    ${TRUNCATE_BIN} ${BIG_FILE} -s ${BIG_FILE_LENGTH}
 
     rm_test_file ${BIG_FILE}
 }
@@ -53,7 +72,7 @@ function test_truncate_empty_file {
 
     # Truncate the file to 1024 length
     t_size=1024
-    truncate ${TEST_TEXT_FILE} -s $t_size
+    ${TRUNCATE_BIN} ${TEST_TEXT_FILE} -s $t_size
 
     check_file_size "${TEST_TEXT_FILE}" $t_size
 
@@ -175,8 +194,8 @@ function test_redirects {
 
     echo 123456 >> $TEST_TEXT_FILE
 
-    LINE1=`sed -n '1,1p' $TEST_TEXT_FILE`
-    LINE2=`sed -n '2,2p' $TEST_TEXT_FILE`
+    LINE1=`${SED_BIN} -n '1,1p' $TEST_TEXT_FILE`
+    LINE2=`${SED_BIN} -n '2,2p' $TEST_TEXT_FILE`
 
     if [ ${LINE1} != "XYZ" ]; then
        echo "LINE1 was not as expected, got ${LINE1}, expected XYZ"
@@ -299,8 +318,8 @@ function test_external_directory_creation {
     describe "Test external directory creation ..."
     OBJECT_NAME="$(basename $PWD)/directory/${TEST_TEXT_FILE}"
     echo "data" | aws_cli s3 cp - "s3://${TEST_BUCKET_1}/${OBJECT_NAME}"
-    ls | grep directory
-    get_permissions directory | grep ^750$
+    ls | grep -q directory
+    get_permissions directory | grep -q 750$
     ls directory
     cmp <(echo "data") directory/${TEST_TEXT_FILE}
     rm -f directory/${TEST_TEXT_FILE}
@@ -477,6 +496,19 @@ function test_special_characters {
     mkdir "TOYOTA TRUCK 8.2.2"
 }
 
+function test_hardlink {
+    describe "Testing hardlinks ..."
+
+    rm -f $TEST_TEXT_FILE
+    rm -f $ALT_TEST_TEXT_FILE
+    echo foo > $TEST_TEXT_FILE
+
+    (
+        set +o pipefail
+        ln $TEST_TEXT_FILE $ALT_TEST_TEXT_FILE 2>&1 | grep -q 'Operation not supported'
+    )
+}
+
 function test_symlink {
     describe "Testing symlinks ..."
 
@@ -551,55 +583,288 @@ function test_mtime_file {
     rm_test_file $ALT_TEST_TEXT_FILE
 }
 
+# [NOTE]
+# If it mounted with relatime or noatime options , the "touch -a"
+# command may not update the atime.
+# In ubuntu:xenial, atime was updated even if relatime was granted.
+# However, it was not updated in bionic/focal.
+# We can probably update atime by explicitly specifying the strictatime
+# option and running the "touch -a" command. However, the strictatime
+# option cannot be set.
+# Therefore, if the relatime option is set, the test with the "touch -a"
+# command is bypassed.
+# We do not know why atime is not updated may or not be affected by
+# these options.(can't say for sure)
+# However, if atime has not been updated, the s3fs_utimens entry point
+# will not be called from FUSE library. We added this bypass because
+# the test became unstable.
+#
 function test_update_time() {
     describe "Testing update time function ..."
 
+    #
     # create the test
+    #
     mk_test_file
+    base_atime=`get_atime $TEST_TEXT_FILE`
+    base_ctime=`get_ctime $TEST_TEXT_FILE`
+    base_mtime=`get_mtime $TEST_TEXT_FILE`
+    sleep 2
+
+    #
+    # chmod -> update only ctime
+    #
+    chmod +x $TEST_TEXT_FILE
+    atime=`get_atime $TEST_TEXT_FILE`
     ctime=`get_ctime $TEST_TEXT_FILE`
     mtime=`get_mtime $TEST_TEXT_FILE`
-
-    sleep 2
-    chmod +x $TEST_TEXT_FILE
-
-    ctime2=`get_ctime $TEST_TEXT_FILE`
-    mtime2=`get_mtime $TEST_TEXT_FILE`
-    if [ $ctime -eq $ctime2 -o $mtime -ne $mtime2 ]; then
-       echo "Expected updated ctime: $ctime != $ctime2 and same mtime: $mtime == $mtime2"
+    if [ $base_atime -ne $atime -o $base_ctime -eq $ctime -o $base_mtime -ne $mtime ]; then
+       echo "chmod expected updated ctime: $base_ctime != $ctime and same mtime: $base_mtime == $mtime, atime: $base_atime == $atime"
        return 1
     fi
-
+    base_ctime=$ctime
     sleep 2
+
+    #
+    # chown -> update only ctime
+    #
     chown $UID $TEST_TEXT_FILE
-
-    ctime3=`get_ctime $TEST_TEXT_FILE`
-    mtime3=`get_mtime $TEST_TEXT_FILE`
-    if [ $ctime2 -eq $ctime3 -o $mtime2 -ne $mtime3 ]; then
-       echo "Expected updated ctime: $ctime2 != $ctime3 and same mtime: $mtime2 == $mtime3"
+    atime=`get_atime $TEST_TEXT_FILE`
+    ctime=`get_ctime $TEST_TEXT_FILE`
+    mtime=`get_mtime $TEST_TEXT_FILE`
+    if [ $base_atime -ne $atime -o $base_ctime -eq $ctime -o $base_mtime -ne $mtime ]; then
+       echo "chown expected updated ctime: $base_ctime != $ctime and same mtime: $base_mtime == $mtime, atime: $base_atime == $atime"
        return 1
     fi
-
+    base_ctime=$ctime
     sleep 2
+
+    #
+    # set_xattr -> update only ctime
+    #
     set_xattr key value $TEST_TEXT_FILE
-
-    ctime4=`get_ctime $TEST_TEXT_FILE`
-    mtime4=`get_mtime $TEST_TEXT_FILE`
-    if [ $ctime3 -eq $ctime4 -o $mtime3 -ne $mtime4 ]; then
-       echo "Expected updated ctime: $ctime3 != $ctime4 and same mtime: $mtime3 == $mtime4"
+    atime=`get_atime $TEST_TEXT_FILE`
+    ctime=`get_ctime $TEST_TEXT_FILE`
+    mtime=`get_mtime $TEST_TEXT_FILE`
+    if [ $base_atime -ne $atime -o $base_ctime -eq $ctime -o $base_mtime -ne $mtime ]; then
+       echo "set_xattr expected updated ctime: $base_ctime != $ctime and same mtime: $base_mtime == $mtime, atime: $base_atime == $atime"
        return 1
     fi
-
+    base_ctime=$ctime
     sleep 2
-    echo foo >> $TEST_TEXT_FILE
 
-    ctime5=`get_ctime $TEST_TEXT_FILE`
-    mtime5=`get_mtime $TEST_TEXT_FILE`
-    if [ $ctime4 -eq $ctime5 -o $mtime4 -eq $mtime5 ]; then
-       echo "Expected updated ctime: $ctime4 != $ctime5 and updated mtime: $mtime4 != $mtime5"
+    #
+    # touch -> update ctime/atime/mtime
+    #
+    touch $TEST_TEXT_FILE
+    atime=`get_atime $TEST_TEXT_FILE`
+    ctime=`get_ctime $TEST_TEXT_FILE`
+    mtime=`get_mtime $TEST_TEXT_FILE`
+    if [ $base_atime -eq $atime -o $base_ctime -eq $ctime -o $base_mtime -eq $mtime ]; then
+       echo "touch expected updated ctime: $base_ctime != $ctime, mtime: $base_mtime != $mtime, atime: $base_atime != $atime"
+       return 1
+    fi
+    base_atime=$atime
+    base_mtime=$mtime
+    base_ctime=$ctime
+    sleep 2
+
+    #
+    # "touch -a" -> update ctime/atime, not update mtime
+    #
+    if ! cat /proc/mounts | grep "^s3fs " | grep "$TEST_BUCKET_MOUNT_POINT_1 " | grep -e noatime -e relatime >/dev/null; then
+        touch -a $TEST_TEXT_FILE
+        atime=`get_atime $TEST_TEXT_FILE`
+        ctime=`get_ctime $TEST_TEXT_FILE`
+        mtime=`get_mtime $TEST_TEXT_FILE`
+        if [ $base_atime -eq $atime -o $base_ctime -eq $ctime -o $base_mtime -ne $mtime ]; then
+           echo "touch with -a option expected updated ctime: $base_ctime != $ctime, atime: $base_atime != $atime and same mtime: $base_mtime == $mtime"
+           return 1
+        fi
+        base_atime=$atime
+        base_ctime=$ctime
+        sleep 2
+    fi
+
+    #
+    # append -> update ctime/mtime, not update atime
+    #
+    echo foo >> $TEST_TEXT_FILE
+    atime=`get_atime $TEST_TEXT_FILE`
+    ctime=`get_ctime $TEST_TEXT_FILE`
+    mtime=`get_mtime $TEST_TEXT_FILE`
+    if [ $base_atime -ne $atime -o $base_ctime -eq $ctime -o $base_mtime -eq $mtime ]; then
+       echo "append expected updated ctime: $base_ctime != $ctime, mtime: $base_mtime != $mtime and same atime: $base_atime == $atime"
+       return 1
+    fi
+    base_mtime=$mtime
+    base_ctime=$ctime
+    sleep 2
+
+    #
+    # cp -p -> update ctime, not update atime/mtime
+    #
+    TIME_TEST_TEXT_FILE=test-s3fs-time.txt
+    cp -p $TEST_TEXT_FILE $TIME_TEST_TEXT_FILE
+    atime=`get_atime $TIME_TEST_TEXT_FILE`
+    ctime=`get_ctime $TIME_TEST_TEXT_FILE`
+    mtime=`get_mtime $TIME_TEST_TEXT_FILE`
+    if [ $base_atime -ne $atime -o $base_ctime -eq $ctime -o $base_mtime -ne $mtime ]; then
+       echo "cp with -p option expected updated ctime: $base_ctime != $ctime and same mtime: $base_mtime == $mtime, atime: $base_atime == $atime"
+       return 1
+    fi
+    sleep 2
+
+    #
+    # mv -> update ctime, not update atime/mtime
+    #
+    TIME2_TEST_TEXT_FILE=test-s3fs-time2.txt
+    mv $TEST_TEXT_FILE $TIME2_TEST_TEXT_FILE
+    atime=`get_atime $TIME2_TEST_TEXT_FILE`
+    ctime=`get_ctime $TIME2_TEST_TEXT_FILE`
+    mtime=`get_mtime $TIME2_TEST_TEXT_FILE`
+    if [ $base_atime -ne $atime -o $base_ctime -eq $ctime -o $base_mtime -ne $mtime ]; then
+       echo "mv expected updated ctime: $base_ctime != $ctime and same mtime: $base_mtime == $mtime, atime: $base_atime == $atime"
        return 1
     fi
 
-    rm_test_file
+    rm_test_file $TIME_TEST_TEXT_FILE
+    rm_test_file $TIME2_TEST_TEXT_FILE
+}
+
+# [NOTE]
+# See the description of test_update_time () for notes about the
+# "touch -a" command and atime.
+#
+function test_update_directory_time() {
+    describe "Testing update time for directory function ..."
+
+    #
+    # create the directory and sub-directory and a file in directory
+    #
+    TIME_TEST_SUBDIR="$TEST_DIR/testsubdir"
+    TIME_TEST_FILE_INDIR="$TEST_DIR/testfile"
+    mk_test_dir
+    mkdir $TIME_TEST_SUBDIR
+    touch $TIME_TEST_FILE_INDIR
+
+    base_atime=`get_atime $TEST_DIR`
+    base_ctime=`get_ctime $TEST_DIR`
+    base_mtime=`get_mtime $TEST_DIR`
+    subdir_atime=`get_atime $TIME_TEST_SUBDIR`
+    subdir_ctime=`get_ctime $TIME_TEST_SUBDIR`
+    subdir_mtime=`get_mtime $TIME_TEST_SUBDIR`
+    subfile_atime=`get_atime $TIME_TEST_FILE_INDIR`
+    subfile_ctime=`get_ctime $TIME_TEST_FILE_INDIR`
+    subfile_mtime=`get_mtime $TIME_TEST_FILE_INDIR`
+    sleep 2
+
+    #
+    # chmod -> update only ctime
+    #
+    chmod 0777 $TEST_DIR
+    atime=`get_atime $TEST_DIR`
+    ctime=`get_ctime $TEST_DIR`
+    mtime=`get_mtime $TEST_DIR`
+    if [ $base_atime -ne $atime -o $base_ctime -eq $ctime -o $base_mtime -ne $mtime ]; then
+       echo "chmod expected updated ctime: $base_ctime != $ctime and same mtime: $base_mtime == $mtime, atime: $base_atime == $atime"
+       return 1
+    fi
+    base_ctime=$ctime
+    sleep 2
+
+    #
+    # chown -> update only ctime
+    #
+    chown $UID $TEST_DIR
+    atime=`get_atime $TEST_DIR`
+    ctime=`get_ctime $TEST_DIR`
+    mtime=`get_mtime $TEST_DIR`
+    if [ $base_atime -ne $atime -o $base_ctime -eq $ctime -o $base_mtime -ne $mtime ]; then
+       echo "chown expected updated ctime: $base_ctime != $ctime and same mtime: $base_mtime == $mtime, atime: $base_atime == $atime"
+       return 1
+    fi
+    base_ctime=$ctime
+    sleep 2
+
+    #
+    # set_xattr -> update only ctime
+    #
+    set_xattr key value $TEST_DIR
+    atime=`get_atime $TEST_DIR`
+    ctime=`get_ctime $TEST_DIR`
+    mtime=`get_mtime $TEST_DIR`
+    if [ $base_atime -ne $atime -o $base_ctime -eq $ctime -o $base_mtime -ne $mtime ]; then
+       echo "set_xattr expected updated ctime: $base_ctime != $ctime and same mtime: $base_mtime == $mtime, atime: $base_atime == $atime"
+       return 1
+    fi
+    base_ctime=$ctime
+    sleep 2
+
+    #
+    # touch -> update ctime/atime/mtime
+    #
+    touch $TEST_DIR
+    atime=`get_atime $TEST_DIR`
+    ctime=`get_ctime $TEST_DIR`
+    mtime=`get_mtime $TEST_DIR`
+    if [ $base_atime -eq $atime -o $base_ctime -eq $ctime -o $base_mtime -eq $mtime ]; then
+       echo "touch expected updated ctime: $base_ctime != $ctime, mtime: $base_mtime != $mtime, atime: $base_atime != $atime"
+       return 1
+    fi
+    base_atime=$atime
+    base_mtime=$mtime
+    base_ctime=$ctime
+    sleep 2
+
+    #
+    # "touch -a" -> update ctime/atime, not update mtime
+    #
+    if ! cat /proc/mounts | grep "^s3fs " | grep "$TEST_BUCKET_MOUNT_POINT_1 " | grep -e noatime -e relatime >/dev/null; then
+        touch -a $TEST_DIR
+        atime=`get_atime $TEST_DIR`
+        ctime=`get_ctime $TEST_DIR`
+        mtime=`get_mtime $TEST_DIR`
+        if [ $base_atime -eq $atime -o $base_ctime -eq $ctime -o $base_mtime -ne $mtime ]; then
+           echo "touch with -a option expected updated ctime: $base_ctime != $ctime, atime: $base_atime != $atime and same mtime: $base_mtime == $mtime"
+           return 1
+        fi
+        base_atime=$atime
+        base_ctime=$ctime
+        sleep 2
+    fi
+
+    #
+    # mv -> update ctime, not update atime/mtime for taget directory
+    #       not update any for sub-directory and a file
+    #
+    TIME_TEST_DIR=timetestdir
+    TIME2_TEST_SUBDIR="$TIME_TEST_DIR/testsubdir"
+    TIME2_TEST_FILE_INDIR="$TIME_TEST_DIR/testfile"
+    mv $TEST_DIR $TIME_TEST_DIR
+    atime=`get_atime $TIME_TEST_DIR`
+    ctime=`get_ctime $TIME_TEST_DIR`
+    mtime=`get_mtime $TIME_TEST_DIR`
+    if [ $base_atime -ne $atime -o $base_ctime -eq $ctime -o $base_mtime -ne $mtime ]; then
+       echo "mv expected updated ctime: $base_ctime != $ctime and same mtime: $base_mtime == $mtime, atime: $base_atime == $atime"
+       return 1
+    fi
+    atime=`get_atime $TIME2_TEST_SUBDIR`
+    ctime=`get_ctime $TIME2_TEST_SUBDIR`
+    mtime=`get_mtime $TIME2_TEST_SUBDIR`
+    if [ $subdir_atime -ne $atime -o $subdir_ctime -ne $ctime -o $subdir_mtime -ne $mtime ]; then
+       echo "mv for sub-directory expected same ctime: $subdir_ctime == $ctime, mtime: $subdir_mtime == $mtime, atime: $subdir_atime == $atime"
+       return 1
+    fi
+    atime=`get_atime $TIME2_TEST_FILE_INDIR`
+    ctime=`get_ctime $TIME2_TEST_FILE_INDIR`
+    mtime=`get_mtime $TIME2_TEST_FILE_INDIR`
+    if [ $subfile_atime -ne $atime -o $subfile_ctime -ne $ctime -o $subfile_mtime -ne $mtime ]; then
+       echo "mv for a file in directory expected same ctime: $subfile_ctime == $ctime, mtime: $subfile_mtime == $mtime, atime: $subfile_atime == $atime"
+       return 1
+    fi
+
+    rm -r $TIME_TEST_DIR
 }
 
 function test_rm_rf_dir {
@@ -648,12 +913,12 @@ function test_overwrite_existing_file_range {
     rm_test_file
 }
 
-function test_concurrency {
+function test_concurrent_directory_updates {
     describe "Test concurrent updates to a directory ..."
     for i in `seq 5`; do echo foo > $i; done
     for process in `seq 10`; do
         for i in `seq 5`; do
-            file=$(ls `seq 5` | sed -n "$(($RANDOM % 5 + 1))p")
+            file=$(ls `seq 5` | ${SED_BIN} -n "$(($RANDOM % 5 + 1))p")
             cat $file >/dev/null || true
             rm -f $file
             echo foo > $file || true
@@ -663,11 +928,21 @@ function test_concurrency {
     rm -f `seq 5`
 }
 
-function test_concurrent_writes {
-    describe "Test concurrent updates to a file ..."
+function test_concurrent_reads {
+    describe "Test concurrent reads from a file ..."
     dd if=/dev/urandom of=${TEST_TEXT_FILE} bs=$BIG_FILE_LENGTH count=1
     for process in `seq 10`; do
-        dd if=/dev/zero of=${TEST_TEXT_FILE} seek=$(($RANDOM % $BIG_FILE_LENGTH)) count=1 bs=1024 conv=notrunc &
+        dd if=${TEST_TEXT_FILE} of=/dev/null seek=$(($RANDOM % $BIG_FILE_LENGTH)) count=16 bs=1024 &
+    done
+    wait
+    rm_test_file
+}
+
+function test_concurrent_writes {
+    describe "Test concurrent writes to a file ..."
+    dd if=/dev/urandom of=${TEST_TEXT_FILE} bs=$BIG_FILE_LENGTH count=1
+    for process in `seq 10`; do
+        dd if=/dev/zero of=${TEST_TEXT_FILE} seek=$(($RANDOM % $BIG_FILE_LENGTH)) count=16 bs=1024 conv=notrunc &
     done
     wait
     rm_test_file
@@ -791,8 +1066,8 @@ function test_cache_file_stat() {
     #
     # get lines from cache stat file
     #
-    CACHE_FILE_STAT_LINE_1=$(sed -n 1p ${CACHE_DIR}/.${TEST_BUCKET_1}.stat/${CACHE_TESTRUN_DIR}/${BIG_FILE})
-    CACHE_FILE_STAT_LINE_2=$(sed -n 2p ${CACHE_DIR}/.${TEST_BUCKET_1}.stat/${CACHE_TESTRUN_DIR}/${BIG_FILE})
+    CACHE_FILE_STAT_LINE_1=$(${SED_BIN} -n 1p ${CACHE_DIR}/.${TEST_BUCKET_1}.stat/${CACHE_TESTRUN_DIR}/${BIG_FILE})
+    CACHE_FILE_STAT_LINE_2=$(${SED_BIN} -n 2p ${CACHE_DIR}/.${TEST_BUCKET_1}.stat/${CACHE_TESTRUN_DIR}/${BIG_FILE})
     if [ -z ${CACHE_FILE_STAT_LINE_1} ] || [ -z ${CACHE_FILE_STAT_LINE_2} ]; then
         echo "could not get first or second line from cache file stat: ${CACHE_DIR}/.${TEST_BUCKET_1}.stat/${CACHE_TESTRUN_DIR}/${BIG_FILE}"
         return 1;
@@ -834,7 +1109,7 @@ function test_cache_file_stat() {
     #
     # get lines from cache stat file
     #
-    CACHE_FILE_STAT_LINE_1=$(sed -n 1p ${CACHE_DIR}/.${TEST_BUCKET_1}.stat/${CACHE_TESTRUN_DIR}/${BIG_FILE})
+    CACHE_FILE_STAT_LINE_1=$(${SED_BIN} -n 1p ${CACHE_DIR}/.${TEST_BUCKET_1}.stat/${CACHE_TESTRUN_DIR}/${BIG_FILE})
     CACHE_FILE_STAT_LINE_E=$(tail -1 ${CACHE_DIR}/.${TEST_BUCKET_1}.stat/${CACHE_TESTRUN_DIR}/${BIG_FILE} 2>/dev/null)
     if [ -z ${CACHE_FILE_STAT_LINE_1} ] || [ -z ${CACHE_FILE_STAT_LINE_E} ]; then
         echo "could not get first or end line from cache file stat: ${CACHE_DIR}/.${TEST_BUCKET_1}.stat/${CACHE_TESTRUN_DIR}/${BIG_FILE}"
@@ -873,7 +1148,7 @@ function test_upload_sparsefile {
     #
     # Make all HOLE file
     #
-    truncate ${BIG_FILE} -s ${BIG_FILE_LENGTH}
+    ${TRUNCATE_BIN} ${BIG_FILE} -s ${BIG_FILE_LENGTH}
 
     #
     # Write some bytes to ABOUT middle in the file
@@ -926,6 +1201,76 @@ function test_mix_upload_entities() {
     rm_test_file "${BIG_FILE}"
 }
 
+#
+# [NOTE]
+# This test runs last because it uses up disk space and may not recover.
+# This may be a problem, especially on MacOS. (See the comment near the definition
+# line for the ENSURE_DISKFREE_SIZE variable)
+#
+function test_ensurespace_move_file() {
+    describe "Testing upload(mv) file when diskspace is not enough ..."
+
+    #
+    # Make test file which is not under mountpoint
+    #
+    mkdir -p ${CACHE_DIR}/.s3fs_test_tmpdir
+    dd if=/dev/urandom of="${CACHE_DIR}/.s3fs_test_tmpdir/${BIG_FILE}" bs=$BIG_FILE_LENGTH count=1
+
+    #
+    # Backup file stat
+    #
+    if [ `uname` = "Darwin" ]; then
+        ORIGINAL_PERMISSIONS=$(stat -f "%u:%g" ${CACHE_DIR}/.s3fs_test_tmpdir/$BIG_FILE)
+    else
+        ORIGINAL_PERMISSIONS=$(stat --format=%u:%g ${CACHE_DIR}/.s3fs_test_tmpdir/$BIG_FILE)
+    fi
+
+    #
+    # Fill the disk size
+    #
+    NOW_CACHE_DISK_AVAIL_SIZE=`get_disk_avail_size ${CACHE_DIR}`
+    TMP_FILE_NO=0
+    while true; do
+      ALLOWED_USING_SIZE=$((NOW_CACHE_DISK_AVAIL_SIZE - ENSURE_DISKFREE_SIZE))
+      if [ ${ALLOWED_USING_SIZE} -gt ${BIG_FILE_LENGTH} ]; then
+          cp -p ${CACHE_DIR}/.s3fs_test_tmpdir/${BIG_FILE} ${CACHE_DIR}/.s3fs_test_tmpdir/${BIG_FILE}_${TMP_FILE_NO}
+          TMP_FILE_NO=$((TMP_FILE_NO + 1))
+      else
+          break;
+      fi
+    done
+
+    #
+    # move file
+    #
+    mv "${CACHE_DIR}/.s3fs_test_tmpdir/${BIG_FILE}" "${BIG_FILE}"
+
+    #
+    # file stat
+    #
+    if [ `uname` = "Darwin" ]; then
+        MOVED_PERMISSIONS=$(stat -f "%u:%g" $BIG_FILE)
+    else
+        MOVED_PERMISSIONS=$(stat --format=%u:%g $BIG_FILE)
+    fi
+    MOVED_FILE_LENGTH=$(ls -l $BIG_FILE | awk '{print $5}')
+
+    #
+    # check
+    #
+    if [ "${MOVED_PERMISSIONS}" != "${ORIGINAL_PERMISSIONS}" ]; then
+        echo "Failed to move file with permission"
+        return 1
+    fi
+    if [ ${MOVED_FILE_LENGTH} -ne ${BIG_FILE_LENGTH} ]; then
+        echo "Failed to move file with file length"
+        return 1
+    fi
+
+    rm_test_file "${BIG_FILE}"
+    rm -rf ${CACHE_DIR}/.s3fs_test_tmpdir
+}
+
 function test_ut_ossfs {
     describe "Testing ossfs python ut..."
     export TEST_BUCKET_MOUNT_POINT=$TEST_BUCKET_MOUNT_POINT_1
@@ -933,6 +1278,9 @@ function test_ut_ossfs {
 }
 
 function add_all_tests {
+    if ps u $S3FS_PID | grep -q use_cache; then
+        add_tests test_cache_file_stat
+    fi
     if ! ps u $S3FS_PID | grep -q ensure_diskfree && ! uname | grep -q Darwin; then
         add_tests test_clean_up_cache
     fi
@@ -960,15 +1308,18 @@ function add_all_tests {
     add_tests test_multipart_copy
     add_tests test_multipart_mix
     add_tests test_special_characters
+    add_tests test_hardlink
     add_tests test_symlink
     add_tests test_extended_attributes
     add_tests test_mtime_file
     add_tests test_update_time
+    add_tests test_update_directory_time
     add_tests test_rm_rf_dir
     add_tests test_copy_file
     add_tests test_write_after_seek_ahead
     add_tests test_overwrite_existing_file_range
-    add_tests test_concurrency
+    add_tests test_concurrent_directory_updates
+    add_tests test_concurrent_reads
     add_tests test_concurrent_writes
     add_tests test_open_second_fd
     add_tests test_write_multiple_offsets
@@ -978,11 +1329,20 @@ function add_all_tests {
     add_tests test_upload_sparsefile
     add_tests test_mix_upload_entities
     add_tests test_ut_ossfs
-    if `ps -ef | grep -v grep | grep s3fs | grep -q use_cache`; then
-        add_tests test_cache_file_stat
+    if ! ps u $S3FS_PID | grep -q ensure_diskfree && ! uname | grep -q Darwin; then
+        add_tests test_ensurespace_move_file
     fi
 }
 
 init_suite
 add_all_tests
 run_suite
+
+#
+# Local variables:
+# tab-width: 4
+# c-basic-offset: 4
+# End:
+# vim600: expandtab sw=4 ts=4 fdm=marker
+# vim<600: expandtab sw=4 ts=4
+#

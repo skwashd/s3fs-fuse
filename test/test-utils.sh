@@ -1,4 +1,23 @@
 #!/bin/bash
+#
+# s3fs - FUSE-based file system backed by Amazon S3
+#
+# Copyright 2007-2008 Randy Rizun <rrizun@gmail.com>
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+#
 
 #### Test utils
 
@@ -15,11 +34,23 @@ BIG_FILE=big-file-s3fs.txt
 BIG_FILE_LENGTH=$((25 * 1024 * 1024))
 export RUN_DIR
 
+# [NOTE]
+# stdbuf, truncate and sed installed on macos do not work as
+# expected(not compatible with Linux).
+# Therefore, macos installs a brew package such as coreutils
+# and uses gnu commands(gstdbuf, gtruncate, gsed).
+# Set your PATH appropriately so that you can find these commands.
+#
 if [ `uname` = "Darwin" ]; then
-    export SED_BUFFER_FLAG="-l"
+    export STDBUF_BIN="gstdbuf"
+    export TRUNCATE_BIN="gtruncate"
+    export SED_BIN="gsed"
 else
-    export SED_BUFFER_FLAG="--unbuffered"
+    export STDBUF_BIN="stdbuf"
+    export TRUNCATE_BIN="truncate"
+    export SED_BIN="sed"
 fi
+export SED_BUFFER_FLAG="--unbuffered"
 
 function get_xattr() {
     if [ `uname` = "Darwin" ]; then
@@ -250,6 +281,14 @@ function get_mtime() {
     fi
 }
 
+function get_atime() {
+    if [ `uname` = "Darwin" ]; then
+        stat -f "%a" "$1"
+    else
+        stat -c "%X" "$1"
+    fi
+}
+
 function get_permissions() {
     if [ `uname` = "Darwin" ]; then
         stat -f "%p" "$1"
@@ -279,3 +318,25 @@ function aws_cli() {
     fi
     aws $* --endpoint-url "${S3_URL}" --no-verify-ssl $FLAGS
 }
+
+function wait_for_port() {
+    PORT=$1
+    for i in $(seq 30); do
+        if exec 3<>"/dev/tcp/127.0.0.1/${PORT}";
+        then
+            exec 3<&-  # Close for read
+            exec 3>&-  # Close for write
+            break
+        fi
+        sleep 1
+    done
+}
+
+#
+# Local variables:
+# tab-width: 4
+# c-basic-offset: 4
+# End:
+# vim600: expandtab sw=4 ts=4 fdm=marker
+# vim<600: expandtab sw=4 ts=4
+#

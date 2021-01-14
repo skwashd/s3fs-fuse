@@ -24,66 +24,48 @@
 #include <cstring>
 #include <string>
 
+#include "common.h"
+#include "s3fs.h"
 #include "s3fs_auth.h"
 #include "string_util.h"
-
-using namespace std;
 
 //-------------------------------------------------------------------
 // Utility Function
 //-------------------------------------------------------------------
-string s3fs_get_content_md5(int fd)
+std::string s3fs_get_content_md5(int fd)
 {
-  unsigned char* md5hex;
-  char* base64;
-  string Signature;
+    unsigned char* md5;
+    char* base64;
+    std::string Signature;
 
-  if(NULL == (md5hex = s3fs_md5hexsum(fd, 0, -1))){
-    return string("");
-  }
-  if(NULL == (base64 = s3fs_base64(md5hex, get_md5_digest_length()))){
-    return string("");  // ENOMEM
-  }
-  delete[] md5hex;
+    if(NULL == (md5 = s3fs_md5_fd(fd, 0, -1))){
+        return std::string("");
+    }
+    if(NULL == (base64 = s3fs_base64(md5, get_md5_digest_length()))){
+        delete[] md5;
+        return std::string("");  // ENOMEM
+    }
+    delete[] md5;
 
-  Signature = base64;
-  delete[] base64;
+    Signature = base64;
+    delete[] base64;
 
-  return Signature;
+    return Signature;
 }
 
-string s3fs_md5sum(int fd, off_t start, ssize_t size)
+std::string s3fs_sha256_hex_fd(int fd, off_t start, off_t size)
 {
-  size_t digestlen = get_md5_digest_length();
-  unsigned char* md5hex;
+    size_t digestlen = get_sha256_digest_length();
+    unsigned char* sha256;
 
-  if(NULL == (md5hex = s3fs_md5hexsum(fd, start, size))){
-    return string("");
-  }
+    if(NULL == (sha256 = s3fs_sha256_fd(fd, start, size))){
+        return std::string("");
+    }
 
-  std::string md5 = s3fs_hex(md5hex, digestlen);
-  delete[] md5hex;
+    std::string sha256hex = s3fs_hex(sha256, digestlen);
+    delete[] sha256;
 
-  return md5;
-}
-
-string s3fs_sha256sum(int fd, off_t start, ssize_t size)
-{
-  size_t digestlen = get_sha256_digest_length();
-  char sha256[2 * digestlen + 1];
-  unsigned char* sha256hex;
-
-  if(NULL == (sha256hex = s3fs_sha256hexsum(fd, start, size))){
-    return string("");
-  }
-
-  memset(sha256, 0, 2 * digestlen + 1);
-  for(size_t pos = 0; pos < digestlen; pos++){
-    snprintf(sha256 + 2 * pos, 3, "%02x", sha256hex[pos]);
-  }
-  delete[] sha256hex;
-
-  return string(sha256);
+    return sha256hex;
 }
 
 /*
@@ -91,6 +73,6 @@ string s3fs_sha256sum(int fd, off_t start, ssize_t size)
 * tab-width: 4
 * c-basic-offset: 4
 * End:
-* vim600: noet sw=4 ts=4 fdm=marker
-* vim<600: noet sw=4 ts=4
+* vim600: expandtab sw=4 ts=4 fdm=marker
+* vim<600: expandtab sw=4 ts=4
 */

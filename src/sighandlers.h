@@ -28,37 +28,37 @@
 //----------------------------------------------
 class S3fsSignals
 {
-  private:
-    static S3fsSignals* pSingleton;
-	static bool         enableUsr1;
+    private:
+        static S3fsSignals* pSingleton;
+        static bool         enableUsr1;
 
-    pthread_t*          pThreadUsr1;
-    Semaphore*          pSemUsr1;
+        pthread_t*          pThreadUsr1;
+        Semaphore*          pSemUsr1;
 
-  protected:
-    static S3fsSignals* get(void) { return pSingleton; }
+    protected:
+        static S3fsSignals* get() { return pSingleton; }
 
-    static void HandlerUSR1(int sig);
-    static void* CheckCacheWorker(void* arg);
+        static void HandlerUSR1(int sig);
+        static void* CheckCacheWorker(void* arg);
 
-    static void HandlerUSR2(int sig);
-    static bool InitUsr2Handler(void);
+        static void HandlerUSR2(int sig);
+        static bool InitUsr2Handler();
 
-    S3fsSignals();
-    ~S3fsSignals();
+        static void HandlerHUP(int sig);
+        static bool InitHupHandler();
 
-    bool InitUsr1Handler(void);
-    bool DestroyUsr1Handler(void);
-    bool WakeupUsr1Thread(void);
+        S3fsSignals();
+        ~S3fsSignals();
 
-  public:
-    static bool Initialize(void);
-    static bool Destroy(void);
+        bool InitUsr1Handler();
+        bool DestroyUsr1Handler();
+        bool WakeupUsr1Thread();
 
-    static bool SetUsr1Handler(const char* path);
+    public:
+        static bool Initialize();
+        static bool Destroy();
 
-    static s3fs_log_level SetLogLevel(s3fs_log_level level);
-    static s3fs_log_level BumpupLogLevel(void);
+        static bool SetUsr1Handler(const char* path);
 };
 
 #endif // S3FS_SIGHANDLERS_H_
@@ -68,6 +68,6 @@ class S3fsSignals
 * tab-width: 4
 * c-basic-offset: 4
 * End:
-* vim600: noet sw=4 ts=4 fdm=marker
-* vim<600: noet sw=4 ts=4
+* vim600: expandtab sw=4 ts=4 fdm=marker
+* vim<600: expandtab sw=4 ts=4
 */
