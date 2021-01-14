@@ -1,3 +1,10 @@
+s3fs-fuse (1.88-1) unstable; urgency=medium
+
+  * New upstream release 1.88.
+  * Bump Standards-Version to 4.5.1.
+
+ -- Mattia Rizzolo <mattia@debian.org>  Thu, 14 Jan 2021 18:08:07 +0100
+
 s3fs-fuse (1.87-1) unstable; urgency=medium
 
   * New upstream release 1.87.  LP: #1891124
