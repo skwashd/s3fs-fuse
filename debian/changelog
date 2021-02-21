@@ -1,3 +1,11 @@
+s3fs-fuse (1.88-2) unstable; urgency=medium
+
+  [ Andrew Gaul ]
+  * d/control: Fix incorrect file size limitation in the long description.
+    See https://github.com/s3fs-fuse/s3fs-fuse/issues/1527
+
+ -- Mattia Rizzolo <mattia@debian.org>  Sun, 21 Feb 2021 16:33:19 +0100
+
 s3fs-fuse (1.88-1) unstable; urgency=medium
 
   * New upstream release 1.88.
