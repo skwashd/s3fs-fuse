@@ -1,3 +1,9 @@
+s3fs-fuse (1.89-1) unstable; urgency=medium
+
+  * New upstream release 1.89.
+
+ -- Mattia Rizzolo <mattia@debian.org>  Thu, 25 Feb 2021 20:24:56 +0100
+
 s3fs-fuse (1.88-2) unstable; urgency=medium
 
   [ Andrew Gaul ]
