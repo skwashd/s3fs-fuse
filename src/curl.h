@@ -161,8 +161,10 @@ class S3fsCurl
         static int              max_parallel_cnt;
         static int              max_multireq;
         static off_t            multipart_size;
+        static off_t            multipart_copy_size;
         static signature_type_t signature_type;
         static bool             is_ua;             // User-Agent
+        static bool             listobjectsv2;
         static bool             requester_pays;
 
         // variables
@@ -351,11 +353,15 @@ class S3fsCurl
         static const char* GetIAMRole() { return S3fsCurl::IAM_role.c_str(); }
         static bool SetMultipartSize(off_t size);
         static off_t GetMultipartSize() { return S3fsCurl::multipart_size; }
+        static bool SetMultipartCopySize(off_t size);
+        static off_t GetMultipartCopySize() { return S3fsCurl::multipart_copy_size; }
         static signature_type_t SetSignatureType(signature_type_t signature_type) { signature_type_t bresult = S3fsCurl::signature_type; S3fsCurl::signature_type = signature_type; return bresult; }
         static signature_type_t GetSignatureType() { return S3fsCurl::signature_type; }
         static bool SetUserAgentFlag(bool isset) { bool bresult = S3fsCurl::is_ua; S3fsCurl::is_ua = isset; return bresult; }
         static bool IsUserAgentFlag() { return S3fsCurl::is_ua; }
         static void InitUserAgent();
+        static bool SetListObjectsV2(bool isset) { bool bresult = S3fsCurl::listobjectsv2; S3fsCurl::listobjectsv2 = isset; return bresult; }
+        static bool IsListObjectsV2() { return S3fsCurl::listobjectsv2; }
         static bool SetRequesterPays(bool flag) { bool old_flag = S3fsCurl::requester_pays; S3fsCurl::requester_pays = flag; return old_flag; }
         static bool IsRequesterPays() { return S3fsCurl::requester_pays; }
         static bool SetIMDSVersion(int version);

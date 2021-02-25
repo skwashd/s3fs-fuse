@@ -90,6 +90,7 @@ static bool is_ibm_iam_auth       = false;
 static bool is_use_xattr          = false;
 static bool is_use_session_token  = false;
 static bool create_bucket         = false;
+static off_t multipart_threshold  = 25 * 1024 * 1024;
 static int64_t singlepart_copy_limit = 512 * 1024 * 1024;
 static bool is_specified_endpoint = false;
 static int s3fs_init_deferred_exit_status = 0;
@@ -106,7 +107,7 @@ static const std::string aws_secretkey         = "AWSSecretKey";
 //-------------------------------------------------------------------
 // Global functions : prototype
 //-------------------------------------------------------------------
-int put_headers(const char* path, headers_t& meta, bool is_copy, bool update_mtime = true);       // [NOTE] global function because this is called from FdEntity class
+int put_headers(const char* path, headers_t& meta, bool is_copy);       // [NOTE] global function because this is called from FdEntity class
 
 //-------------------------------------------------------------------
 // Static functions : prototype
@@ -118,7 +119,7 @@ static int get_object_attribute(const char* path, struct stat* pstbuf, headers_t
 static int check_object_access(const char* path, int mask, struct stat* pstbuf);
 static int check_object_owner(const char* path, struct stat* pstbuf);
 static int check_parent_object_access(const char* path, int mask);
-static FdEntity* get_local_fent(AutoFdEntity& autoent, const char* path, bool is_load = false);
+static int get_local_fent(AutoFdEntity& autoent, FdEntity **entity, const char* path, bool is_load = false);
 static bool multi_head_callback(S3fsCurl* s3fscurl);
 static S3fsCurl* multi_head_retry_callback(S3fsCurl* s3fscurl);
 static int readdir_multi_head(const char* path, const S3ObjList& head, void* buf, fuse_fill_dir_t filler);
@@ -219,7 +220,7 @@ static bool is_special_name_folder_object(const char* path)
 
     if(std::string::npos == strpath.find("_$folder$", 0)){
         if('/' == strpath[strpath.length() - 1]){
-            strpath = strpath.substr(0, strpath.length() - 1);
+            strpath.erase(strpath.length() - 1);
         }
         strpath += "_$folder$";
     }
@@ -256,7 +257,7 @@ static int chk_dir_object_type(const char* path, std::string& newpath, std::stri
     if('/' != newpath[newpath.length() - 1]){
         std::string::size_type Pos;
         if(std::string::npos != (Pos = newpath.find("_$folder$", 0))){
-            newpath = newpath.substr(0, Pos);
+            newpath.erase(Pos);
         }
         newpath += "/";
     }
@@ -268,7 +269,8 @@ static int chk_dir_object_type(const char* path, std::string& newpath, std::stri
         if(is_special_name_folder_object(newpath.c_str())){     // check support_compat_dir in this function
             // "_$folder$" type.
             (*pType) = DIRTYPE_FOLDER;
-            nowpath = newpath.substr(0, newpath.length() - 1) + "_$folder$"; // cut and add
+            nowpath.erase(newpath.length() - 1);
+            nowpath += "_$folder$"; // cut and add
         }else if(isforce){
             // "no dir object" type.
             (*pType) = DIRTYPE_NOOBJ;
@@ -285,7 +287,7 @@ static int chk_dir_object_type(const char* path, std::string& newpath, std::stri
         }
     }else if(support_compat_dir){
         // Check "dir" when support_compat_dir is enabled
-        nowpath = newpath.substr(0, newpath.length() - 1);
+        nowpath.erase(newpath.length() - 1);
         if(0 == (result = get_object_attribute(nowpath.c_str(), NULL, pmeta, false, &isforce))){
             // Found "dir" cache --> this case is only "dir" type.
             // Because, if object is "_$folder$" or "no dir object", the cache is "dir/" type.
@@ -379,7 +381,7 @@ static int get_object_attribute(const char* path, struct stat* pstbuf, headers_t
     (*pisforce) = false;
     strpath     = path;
     if(support_compat_dir && overcheck && std::string::npos != (Pos = strpath.find("_$folder$", 0))){
-        strpath = strpath.substr(0, Pos);
+        strpath.erase(Pos);
         strpath += "/";
     }
     if(StatCache::getStatCacheData()->GetStat(strpath, pstat, pheader, overcheck, pisforce)){
@@ -397,7 +399,26 @@ static int get_object_attribute(const char* path, struct stat* pstbuf, headers_t
     s3fscurl.DestroyCurlHandle();
 
     // if not found target path object, do over checking
-    if(0 != result){
+    if(-EPERM == result){
+        // [NOTE]
+        // In case of a permission error, it exists in directory
+        // file list but inaccessible. So there is a problem that
+        // it will send a HEAD request every time, because it is
+        // not registered in the Stats cache.
+        // Therefore, even if the file has a permission error, it
+        // should be registered in the Stats cache. However, if
+        // the response without modifiying is registered in the
+        // cache, the file permission will be 0644(umask dependent)
+        // because the meta header does not exist.
+        // Thus, set the mode of 0000 here in the meta header so
+        // that s3fs can print a permission error when the file
+        // is actually accessed.
+        // It is better not to set meta header other than mode,
+        // so do not do it.
+        //
+        (*pheader)["x-amz-meta-mode"] = str(0);
+
+    }else if(0 != result){
         if(overcheck){
             // when support_compat_dir is disabled, strpath maybe have "_$folder$".
             if('/' != strpath[strpath.length() - 1] && std::string::npos == strpath.find("_$folder$", 0)){
@@ -408,7 +429,7 @@ static int get_object_attribute(const char* path, struct stat* pstbuf, headers_t
             }
             if(support_compat_dir && 0 != result){
                 // now path is "object/", do check "object_$folder$" for over checking
-                strpath     = strpath.substr(0, strpath.length() - 1);
+                strpath.erase(strpath.length() - 1);
                 strpath    += "_$folder$";
                 result      = s3fscurl.HeadRequest(strpath.c_str(), (*pheader));
                 s3fscurl.DestroyCurlHandle();
@@ -416,7 +437,7 @@ static int get_object_attribute(const char* path, struct stat* pstbuf, headers_t
               if(0 != result){
                   // cut "_$folder$" for over checking "no dir object" after here
                   if(std::string::npos != (Pos = strpath.find("_$folder$", 0))){
-                      strpath  = strpath.substr(0, Pos);
+                      strpath.erase(Pos);
                   }
               }
             }
@@ -424,7 +445,7 @@ static int get_object_attribute(const char* path, struct stat* pstbuf, headers_t
         if(support_compat_dir && 0 != result && std::string::npos == strpath.find("_$folder$", 0)){
             // now path is "object" or "object/", do check "no dir object" which is not object but has only children.
             if('/' == strpath[strpath.length() - 1]){
-                strpath = strpath.substr(0, strpath.length() - 1);
+                strpath.erase(strpath.length() - 1);
             }
             if(-ENOTEMPTY == directory_empty(strpath.c_str())){
                 // found "no dir object".
@@ -445,7 +466,11 @@ static int get_object_attribute(const char* path, struct stat* pstbuf, headers_t
         }
     }
 
-    if(0 != result){
+    // [NOTE]
+    // If the file is listed but not allowed access, put it in
+    // the positive cache instead of the negative cache.
+    // 
+    if(0 != result && -EPERM != result){
         // finally, "path" object did not find. Add no object cache.
         strpath = path;  // reset original
         StatCache::getStatCacheData()->AddNoObjectCache(strpath);
@@ -454,7 +479,7 @@ static int get_object_attribute(const char* path, struct stat* pstbuf, headers_t
 
     // if path has "_$folder$", need to cut it.
     if(std::string::npos != (Pos = strpath.find("_$folder$", 0))){
-        strpath = strpath.substr(0, Pos);
+        strpath.erase(Pos);
         strpath += "/";
     }
 
@@ -676,16 +701,17 @@ bool get_object_sse_type(const char* path, sse_type_t& ssetype, std::string& sse
     return true;
 }
 
-static FdEntity* get_local_fent(AutoFdEntity& autoent, const char* path, bool is_load)
+static int get_local_fent(AutoFdEntity& autoent, FdEntity **entity, const char* path, bool is_load)
 {
+    int         result;
     struct stat stobj;
     FdEntity*   ent;
     headers_t   meta;
 
     S3FS_PRN_INFO2("[path=%s]", path);
 
-    if(0 != get_object_attribute(path, &stobj, &meta)){
-        return NULL;
+    if(0 != (result = get_object_attribute(path, &stobj, &meta))){
+        return result;
     }
 
     // open
@@ -694,15 +720,16 @@ static FdEntity* get_local_fent(AutoFdEntity& autoent, const char* path, bool is
 
     if(NULL == (ent = autoent.Open(path, &meta, stobj.st_size, mtime, force_tmpfile, true))){
         S3FS_PRN_ERR("Could not open file. errno(%d)", errno);
-        return NULL;
+        return -EIO;
     }
     // load
     if(is_load && !ent->OpenAndLoadAll(&meta)){
         S3FS_PRN_ERR("Could not load file. errno(%d)", errno);
         autoent.Close();
-        return NULL;
+        return -EIO;
     }
-    return ent;
+    *entity = ent;
+    return 0;
 }
 
 //
@@ -710,7 +737,7 @@ static FdEntity* get_local_fent(AutoFdEntity& autoent, const char* path, bool is
 // ow_sse_flg is for over writing sse header by use_sse option.
 // @return fuse return code
 //
-int put_headers(const char* path, headers_t& meta, bool is_copy, bool update_mtime)
+int put_headers(const char* path, headers_t& meta, bool is_copy)
 {
     int         result;
     S3fsCurl    s3fscurl(true);
@@ -723,48 +750,13 @@ int put_headers(const char* path, headers_t& meta, bool is_copy, bool update_mti
     //     get_object_attribute() returns error with initializing buf.
     (void)get_object_attribute(path, &buf);
 
-    if(buf.st_size >= FIVE_GB){
-        // multipart
-        if(nocopyapi || nomultipart){
-            return -EFBIG;    // File too large
-        }
+    if(!nocopyapi && !nomultipart && buf.st_size >= multipart_threshold){
         if(0 != (result = s3fscurl.MultipartHeadRequest(path, buf.st_size, meta, is_copy))){
             return result;
         }
     }else{
         if(0 != (result = s3fscurl.PutHeadRequest(path, meta, is_copy))){
             return result;
-        }
-    }
-
-    // [NOTE]
-    // if path is 'dir/', it does not have cache(could not open file for directory stat)
-    //
-    if(update_mtime && '/' != path[strlen(path) - 1] ){
-        AutoFdEntity autoent;
-        FdEntity*    ent;
-        if(NULL == (ent = autoent.ExistOpen(path, -1, !FdManager::IsCacheDir()))){
-            // no opened fd
-            if(FdManager::IsCacheDir()){
-                // create cache file if be needed
-                ent = autoent.Open(path, &meta, buf.st_size, -1, false, true);
-            }
-        }
-        if(ent){
-            time_t mtime = get_mtime(meta);
-            time_t ctime = get_ctime(meta);
-            time_t atime = get_atime(meta);
-            if(mtime < 0){
-                mtime = 0L;
-            }
-            if(ctime < 0){
-                ctime = 0L;
-            }
-            if(atime < 0){
-                atime = 0L;
-            }
-            ent->SetMCtime(mtime, ctime);
-            ent->SetAtime(atime);
         }
     }
     return 0;
@@ -819,9 +811,10 @@ static int s3fs_readlink(const char* _path, char* buf, size_t size)
         {   // scope for AutoFdEntity
             AutoFdEntity autoent;
             FdEntity*    ent;
-            if(NULL == (ent = get_local_fent(autoent, path))){
+            int          result;
+            if(0 != (result = get_local_fent(autoent, &ent, path))){
                 S3FS_PRN_ERR("could not get fent(file=%s)", path);
-                return -EIO;
+                return result;
             }
             // Get size
             off_t readsize;
@@ -1004,7 +997,7 @@ static int create_directory_object(const char* path, mode_t mode, time_t atime, 
     S3FS_PRN_INFO1("[path=%s][mode=%04o][atime=%lld][mtime=%lld][ctime=%lld][uid=%u][gid=%u]", path, mode, static_cast<long long>(atime), static_cast<long long>(ctime), static_cast<long long>(mtime), (unsigned int)uid, (unsigned int)gid);
 
     if(!path || '\0' == path[0]){
-        return -1;
+        return -EINVAL;
     }
     std::string tpath = path;
     if('/' != tpath[tpath.length() - 1]){
@@ -1121,7 +1114,7 @@ static int s3fs_rmdir(const char* _path)
     // Then "dir/" is not exists, but curl_delete returns 0.
     // So need to check "dir" and should be removed it.
     if('/' == strpath[strpath.length() - 1]){
-        strpath = strpath.substr(0, strpath.length() - 1);
+        strpath.erase(strpath.length() - 1);
     }
     if(0 == get_object_attribute(strpath.c_str(), &stbuf, NULL, false)){
         if(S_ISDIR(stbuf.st_mode)){
@@ -1210,9 +1203,10 @@ static int s3fs_symlink(const char* _from, const char* _to)
 
 static int rename_object(const char* from, const char* to, bool update_ctime)
 {
-    int result;
+    int         result;
     std::string s3_realpath;
-    headers_t meta;
+    headers_t   meta;
+    struct stat buf;
 
     S3FS_PRN_INFO1("[from=%s][to=%s]", from , to);
 
@@ -1224,7 +1218,7 @@ static int rename_object(const char* from, const char* to, bool update_ctime)
         // not permit removing "from" object parent dir.
         return result;
     }
-    if(0 != (result = get_object_attribute(from, NULL, &meta))){
+    if(0 != (result = get_object_attribute(from, &buf, &meta))){
         return result;
     }
     s3_realpath = get_realpath(from);
@@ -1236,17 +1230,51 @@ static int rename_object(const char* from, const char* to, bool update_ctime)
     meta["Content-Type"]             = S3fsCurl::LookupMimeType(std::string(to));
     meta["x-amz-metadata-directive"] = "REPLACE";
 
-    if(0 != (result = put_headers(to, meta, true))){
-        return result;
-    }
+    // [NOTE]
+    // If it has a cache, open it first and leave it open until rename.
+    // The cache is renamed after put_header, because it must be open
+    // at the time of renaming.
+    {
+        // update time
+        AutoFdEntity autoent;
+        FdEntity*    ent;
+        if(NULL == (ent = autoent.ExistOpen(from, -1, !FdManager::IsCacheDir()))){
+            // no opened fd
+            if(FdManager::IsCacheDir()){
+                // create cache file if be needed
+                ent = autoent.Open(from, &meta, buf.st_size, -1, false, true);
+            }
+            if(ent){
+                time_t mtime = get_mtime(meta);
+                time_t ctime = get_ctime(meta);
+                time_t atime = get_atime(meta);
+                if(mtime < 0){
+                    mtime = 0L;
+                }
+                if(ctime < 0){
+                    ctime = 0L;
+                }
+                if(atime < 0){
+                    atime = 0L;
+                }
+                ent->SetMCtime(mtime, ctime);
+                ent->SetAtime(atime);
+            }
+        }
 
-    FdManager::get()->Rename(from, to);
+        // copy
+        if(0 != (result = put_headers(to, meta, true))){
+            return result;
+        }
+
+        // rename
+        FdManager::get()->Rename(from, to);
+    }
 
     // Remove file
     result = s3fs_unlink(from);
 
     StatCache::getStatCacheData()->DelStat(to);
-    FdManager::DeleteCacheFile(to);
 
     return result;
 }
@@ -1270,9 +1298,9 @@ static int rename_object_nocopy(const char* from, const char* to, bool update_ct
     {   // scope for AutoFdEntity
         AutoFdEntity autoent;
         FdEntity*    ent;
-        if(NULL == (ent = get_local_fent(autoent, from, true))){
+        if(0 != (result = get_local_fent(autoent, &ent, from, true))){
             S3FS_PRN_ERR("could not open and read file(%s)", from);
-            return -EIO;
+            return result;
         }
 
         // Set header
@@ -1299,7 +1327,6 @@ static int rename_object_nocopy(const char* from, const char* to, bool update_ct
 
     // Stats
     StatCache::getStatCacheData()->DelStat(to);
-    FdManager::DeleteCacheFile(to);
 
     return result;
 }
@@ -1456,7 +1483,7 @@ static int rename_directory(const char* from, const char* to)
             if(0 != (result = clone_directory_object(mn_cur->old_path, mn_cur->new_path, (strfrom == mn_cur->old_path)))){
                 S3FS_PRN_ERR("clone_directory_object returned an error(%d)", result);
                 free_mvnodes(mn_head);
-                return -EIO;
+                return result;
             }
         }
     }
@@ -1473,7 +1500,7 @@ static int rename_directory(const char* from, const char* to)
             if(0 != result){
                 S3FS_PRN_ERR("rename_object returned an error(%d)", result);
                 free_mvnodes(mn_head);
-                return -EIO;
+                return result;
             }
         }
     }
@@ -1485,7 +1512,7 @@ static int rename_directory(const char* from, const char* to)
                 if(0 != (result = s3fs_rmdir(mn_cur->old_path))){
                     S3FS_PRN_ERR("s3fs_rmdir returned an error(%d)", result);
                     free_mvnodes(mn_head);
-                    return -EIO;
+                    return result;
                 }
             }else{
                 // cache clear.
@@ -1622,25 +1649,22 @@ static int s3fs_chmod(const char* _path, mode_t mode)
         //
         AutoFdEntity autoent;
         FdEntity*    ent;
+        bool         need_put_header = true;
         if(NULL != (ent = autoent.ExistOpen(path, -1, true))){
-            // the file is opened now.
             if(ent->MergeOrgMeta(updatemeta)){
-                // now uploading
-                // the meta is pending and accumulated to be put after the upload is complete.
+                // meta is changed, but now uploading.
+                // then the meta is pending and accumulated to be put after the upload is complete.
                 S3FS_PRN_INFO("meta pending until upload is complete");
-            }else{
-                // allow to put header
-                // updatemeta already merged the orgmeta of the opened files.
-                if(0 != put_headers(strpath.c_str(), updatemeta, true)){
-                    return -EIO;
-                }
-                StatCache::getStatCacheData()->DelStat(nowcache);
+                need_put_header = false;
             }
-        }else{
-            // not opened file, then put headers
+        }
+        if(need_put_header){
+            // not found opened file.
             merge_headers(meta, updatemeta, true);
-            if(0 != put_headers(strpath.c_str(), meta, true)){
-                return -EIO;
+
+            // upload meta directly.
+            if(0 != (result = put_headers(strpath.c_str(), meta, true))){
+                return result;
             }
             StatCache::getStatCacheData()->DelStat(nowcache);
         }
@@ -1705,9 +1729,9 @@ static int s3fs_chmod_nocopy(const char* _path, mode_t mode)
         // open & load
         AutoFdEntity autoent;
         FdEntity*    ent;
-        if(NULL == (ent = get_local_fent(autoent, strpath.c_str(), true))){
+        if(0 != (result = get_local_fent(autoent, &ent, strpath.c_str(), true))){
             S3FS_PRN_ERR("could not open and read file(%s)", strpath.c_str());
-            return -EIO;
+            return result;
         }
 
         ent->SetCtime(time(NULL));
@@ -1798,25 +1822,22 @@ static int s3fs_chown(const char* _path, uid_t uid, gid_t gid)
         //
         AutoFdEntity autoent;
         FdEntity*    ent;
+        bool         need_put_header = true;
         if(NULL != (ent = autoent.ExistOpen(path, -1, true))){
-            // the file is opened now.
             if(ent->MergeOrgMeta(updatemeta)){
-                // now uploading
-                // the meta is pending and accumulated to be put after the upload is complete.
+                // meta is changed, but now uploading.
+                // then the meta is pending and accumulated to be put after the upload is complete.
                 S3FS_PRN_INFO("meta pending until upload is complete");
-            }else{
-                // allow to put header
-                // updatemeta already merged the orgmeta of the opened files.
-                if(0 != put_headers(strpath.c_str(), updatemeta, true)){
-                    return -EIO;
-                }
-                StatCache::getStatCacheData()->DelStat(nowcache);
+                need_put_header = false;
             }
-        }else{
-            // not opened file, then put headers
+        }
+        if(need_put_header){
+            // not found opened file.
             merge_headers(meta, updatemeta, true);
-            if(0 != put_headers(strpath.c_str(), meta, true)){
-                return -EIO;
+
+            // upload meta directly.
+            if(0 != (result = put_headers(strpath.c_str(), meta, true))){
+                return result;
             }
             StatCache::getStatCacheData()->DelStat(nowcache);
         }
@@ -1888,9 +1909,9 @@ static int s3fs_chown_nocopy(const char* _path, uid_t uid, gid_t gid)
         // open & load
         AutoFdEntity autoent;
         FdEntity*    ent;
-        if(NULL == (ent = get_local_fent(autoent, strpath.c_str(), true))){
+        if(0 != (result = get_local_fent(autoent, &ent, strpath.c_str(), true))){
             S3FS_PRN_ERR("could not open and read file(%s)", strpath.c_str());
-            return -EIO;
+            return result;
         }
 
         ent->SetCtime(time(NULL));
@@ -1978,34 +1999,39 @@ static int s3fs_utimens(const char* _path, const struct timespec ts[2])
         //
         AutoFdEntity autoent;
         FdEntity*    ent;
+        bool         need_put_header = true;
+        bool         keep_mtime      = false;
         if(NULL != (ent = autoent.ExistOpen(path, -1, true))){
-            // the file is opened now.
             if(ent->MergeOrgMeta(updatemeta)){
-                // now uploading
-                // the meta is pending and accumulated to be put after the upload is complete.
+                // meta is changed, but now uploading.
+                // then the meta is pending and accumulated to be put after the upload is complete.
                 S3FS_PRN_INFO("meta pending until upload is complete");
+                need_put_header = false;
+
             }else{
-                // allow to put header
-                // updatemeta already merged the orgmeta of the opened files.
-                if(0 != put_headers(strpath.c_str(), updatemeta, true)){
-                    return -EIO;
-                }
-                StatCache::getStatCacheData()->DelStat(nowcache);
+                S3FS_PRN_INFO("meta is not pending, but need to keep current mtime.");
 
                 // [NOTE]
                 // Depending on the order in which write/flush and utimens are called,
                 // the mtime updated here may be overwritten at the time of flush.
                 // To avoid that, set a special flag.
                 //
-                ent->SetHoldingMtime(ts[1].tv_sec);     // ts[1].tv_sec is mtime
+                keep_mtime = true;
             }
-        }else{
-            // not opened file, then put headers
+        }
+        if(need_put_header){
+            // not found opened file.
             merge_headers(meta, updatemeta, true);
-            if(0 != put_headers(strpath.c_str(), meta, true)){
-                return -EIO;
+
+            // upload meta directly.
+            if(0 != (result = put_headers(strpath.c_str(), meta, true))){
+                return result;
             }
             StatCache::getStatCacheData()->DelStat(nowcache);
+
+            if(keep_mtime){
+                ent->SetHoldingMtime(ts[1].tv_sec);     // ts[1].tv_sec is mtime
+            }
         }
     }
     S3FS_MALLOCTRIM(0);
@@ -2070,9 +2096,9 @@ static int s3fs_utimens_nocopy(const char* _path, const struct timespec ts[2])
         // open & load
         AutoFdEntity autoent;
         FdEntity*    ent;
-        if(NULL == (ent = get_local_fent(autoent, strpath.c_str(), true))){
+        if(0 != (result = get_local_fent(autoent, &ent, strpath.c_str(), true))){
             S3FS_PRN_ERR("could not open and read file(%s)", strpath.c_str());
-            return -EIO;
+            return result;
         }
 
         // set mtime/ctime
@@ -2513,7 +2539,7 @@ static int readdir_multi_head(const char* path, const S3ObjList& head, void* buf
 
         std::string fillpath = disppath;
         if('/' == disppath[disppath.length() - 1]){
-            fillpath = fillpath.substr(0, fillpath.length() -1);
+            fillpath.erase(fillpath.length() -1);
         }
         fillerlist.push_back(fillpath);
 
@@ -2616,6 +2642,7 @@ static int list_bucket(const char* path, S3ObjList& head, const char* delimiter,
     std::string query_delimiter;
     std::string query_prefix;
     std::string query_maxkey;
+    std::string next_continuation_token;
     std::string next_marker;
     bool truncated = true;
     S3fsCurl  s3fscurl;
@@ -2646,7 +2673,16 @@ static int list_bucket(const char* path, S3ObjList& head, const char* delimiter,
     }
 
     while(truncated){
-        std::string each_query = query_delimiter;
+        // append parameters to query in alphabetical order
+        std::string each_query = "";
+        if(!next_continuation_token.empty()){
+            each_query += "continuation-token=" + urlEncode(next_continuation_token) + "&";
+            next_continuation_token = "";
+        }
+        each_query += query_delimiter;
+        if(S3fsCurl::IsListObjectsV2()){
+            each_query += "list-type=2&";
+        }
         if(!next_marker.empty()){
             each_query += "marker=" + urlEncode(next_marker) + "&";
             next_marker = "";
@@ -2665,19 +2701,24 @@ static int list_bucket(const char* path, S3ObjList& head, const char* delimiter,
         // xmlDocPtr
         if(NULL == (doc = xmlReadMemory(body->str(), static_cast<int>(body->size()), "", NULL, 0))){
             S3FS_PRN_ERR("xmlReadMemory returns with error.");
-            return -1;
+            return -EIO;
         }
         if(0 != append_objects_from_xml(path, doc, head)){
             S3FS_PRN_ERR("append_objects_from_xml returns with error.");
             xmlFreeDoc(doc);
-            return -1;
+            return -EIO;
         }
         if(true == (truncated = is_truncated(doc))){
-            xmlChar* tmpch = get_next_marker(doc);
-            if(tmpch){
+            xmlChar* tmpch;
+            if(NULL != (tmpch = get_next_contination_token(doc))){
+                next_continuation_token = (char*)tmpch;
+                xmlFree(tmpch);
+            }else if(NULL != (tmpch = get_next_marker(doc))){
                 next_marker = (char*)tmpch;
                 xmlFree(tmpch);
-            }else{
+            }
+
+            if(next_continuation_token.empty() && next_marker.empty()){
                 // If did not specify "delimiter", s3 did not return "NextMarker".
                 // On this case, can use last name for next marker.
                 //
@@ -2711,15 +2752,16 @@ static int list_bucket(const char* path, S3ObjList& head, const char* delimiter,
 static int remote_mountpath_exists(const char* path)
 {
     struct stat stbuf;
+    int result;
 
     S3FS_PRN_INFO1("[path=%s]", path);
 
     // getattr will prefix the path with the remote mountpoint
-    if(0 != get_object_attribute("/", &stbuf, NULL)){
-        return -1;
+    if(0 != (result = get_object_attribute("/", &stbuf, NULL))){
+        return result;
     }
     if(!S_ISDIR(stbuf.st_mode)){
-        return -1;
+        return -ENOTDIR;
     }
     return 0;
 }
@@ -2959,9 +3001,8 @@ static int s3fs_setxattr(const char* path, const char* name, const char* value, 
     //
     AutoFdEntity autoent;
     FdEntity*    ent;
+    bool         need_put_header = true;
     if(NULL != (ent = autoent.ExistOpen(path, -1, true))){
-        // the file is opened now.
-
         // get xattr and make new xattr
         std::string strxattr;
         if(ent->GetXattr(strxattr)){
@@ -2977,31 +3018,26 @@ static int s3fs_setxattr(const char* path, const char* name, const char* value, 
         }
 
         if(ent->MergeOrgMeta(updatemeta)){
-            // now uploading
-            // the meta is pending and accumulated to be put after the upload is complete.
+            // meta is changed, but now uploading.
+            // then the meta is pending and accumulated to be put after the upload is complete.
             S3FS_PRN_INFO("meta pending until upload is complete");
-        }else{
-            // allow to put header
-            // updatemeta already merged the orgmeta of the opened files.
-            if(0 != put_headers(strpath.c_str(), updatemeta, true)){
-                return -EIO;
-            }
-            StatCache::getStatCacheData()->DelStat(nowcache);
+            need_put_header = false;
         }
-    }else{
-        // not opened file, then put headers
-        merge_headers(meta, updatemeta, true);
-
-        // NOTICE: modify xattr from base meta
+    }
+    if(need_put_header){
+        // not found opened file.
         if(0 != (result = set_xattrs_to_header(meta, name, value, size, flags))){
             return result;
         }
+        merge_headers(meta, updatemeta, true);
 
-        if(0 != put_headers(strpath.c_str(), meta, true)){
-            return -EIO;
+        // upload meta directly.
+        if(0 != (result = put_headers(strpath.c_str(), meta, true))){
+            return result;
         }
         StatCache::getStatCacheData()->DelStat(nowcache);
     }
+
     return 0;
 }
 
@@ -3249,31 +3285,26 @@ static int s3fs_removexattr(const char* path, const char* name)
     //
     AutoFdEntity autoent;
     FdEntity*    ent;
+    bool         need_put_header = true;
     if(NULL != (ent = autoent.ExistOpen(path, -1, true))){
-        // the file is opened now.
         if(ent->MergeOrgMeta(updatemeta)){
-            // now uploading
-            // the meta is pending and accumulated to be put after the upload is complete.
+            // meta is changed, but now uploading.
+            // then the meta is pending and accumulated to be put after the upload is complete.
             S3FS_PRN_INFO("meta pending until upload is complete");
-        }else{
-            // allow to put header
-            // updatemeta already merged the orgmeta of the opened files.
-            if(updatemeta["x-amz-meta-xattr"].empty()){
-                updatemeta.erase("x-amz-meta-xattr");
-            }
-            if(0 != put_headers(strpath.c_str(), updatemeta, true)){
-                return -EIO;
-            }
-            StatCache::getStatCacheData()->DelStat(nowcache);
+            need_put_header = false;
         }
-    }else{
-        // not opened file, then put headers
+    }
+    if(need_put_header){
+        // not found opened file.
         if(updatemeta["x-amz-meta-xattr"].empty()){
             updatemeta.erase("x-amz-meta-xattr");
         }
+
         merge_headers(meta, updatemeta, true);
-        if(0 != put_headers(strpath.c_str(), meta, true)){
-            return -EIO;
+
+        // upload meta directly.
+        if(0 != (result = put_headers(strpath.c_str(), meta, true))){
+            return result;
         }
         StatCache::getStatCacheData()->DelStat(nowcache);
     }
@@ -4026,7 +4057,7 @@ static int set_bucket(const char* arg)
             mount_prefix = pmount_prefix;
             // remove trailing slash
             if(mount_prefix[mount_prefix.size() - 1] == '/'){
-                mount_prefix = mount_prefix.substr(0, mount_prefix.size() - 1);
+                mount_prefix.erase(mount_prefix.size() - 1);
             }
         }
     }else{
@@ -4489,13 +4520,22 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
             }
             return 0;
         }
+        if(is_prefix(arg, "multipart_copy_size=")){
+            off_t size = static_cast<off_t>(cvt_strtoofft(strchr(arg, '=') + sizeof(char)));
+            if(!S3fsCurl::SetMultipartCopySize(size)){
+                S3FS_PRN_EXIT("multipart_copy_size option must be at least 5 MB.");
+                return -1;
+            }
+            return 0;
+        }
         if(is_prefix(arg, "max_dirty_data=")){
             off_t size = static_cast<off_t>(cvt_strtoofft(strchr(arg, '=') + sizeof(char)));
-            if(size < 50){
+            if(size >= 50){
+                size *= 1024 * 1024;
+            }else if(size != -1){
                 S3FS_PRN_EXIT("max_dirty_data option must be at least 50 MB.");
                 return -1;
             }
-            size *= 1024 * 1024;
             max_dirty_data = size;
             return 0;
         }
@@ -4508,8 +4548,16 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
             FdManager::SetEnsureFreeDiskSpace(dfsize);
             return 0;
         }
+        if(is_prefix(arg, "multipart_threshold=")){
+            multipart_threshold = static_cast<int64_t>(cvt_strtoofft(strchr(arg, '=') + sizeof(char))) * 1024 * 1024;
+            if(multipart_threshold <= MIN_MULTIPART_SIZE){
+                S3FS_PRN_EXIT("multipart_threshold must be at least %lld, was: %lld", static_cast<long long>(MIN_MULTIPART_SIZE), static_cast<long long>(multipart_threshold));
+                return -1;
+            }
+            return 0;
+        }
         if(is_prefix(arg, "singlepart_copy_limit=")){
-            singlepart_copy_limit = static_cast<int64_t>(cvt_strtoofft(strchr(arg, '=') + sizeof(char))) * 1024;
+            singlepart_copy_limit = static_cast<int64_t>(cvt_strtoofft(strchr(arg, '=') + sizeof(char))) * 1024 * 1024;
             return 0;
         }
         if(is_prefix(arg, "ahbe_conf=")){
@@ -4599,6 +4647,10 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
         }
         if(0 == strcmp(arg, "noua")){
             S3fsCurl::SetUserAgentFlag(false);
+            return 0;
+        }
+        if(0 == strcmp(arg, "listobjectsv2")){
+            S3fsCurl::SetListObjectsV2(true);
             return 0;
         }
         if(0 == strcmp(arg, "use_xattr")){
@@ -4697,6 +4749,13 @@ static int my_fuse_opt_proc(void* data, const char* arg, int key, struct fuse_ar
                 S3FS_PRN_EXIT("option curldbg has unknown parameter(%s).", strlevel);
                 return -1;
             }
+            return 0;
+        }
+        //
+        // no time stamp in debug message
+        //
+        if(0 == strcmp(arg, "no_time_stamp_msg")){
+            S3fsLog::SetTimeStamp(false);
             return 0;
         }
         //
@@ -5046,6 +5105,7 @@ int main(int argc, char* argv[])
     // Check multipart / copy api for mix multipart uploading
     if(nomultipart || nocopyapi || norenameapi){
         FdEntity::SetNoMixMultipart();
+        max_dirty_data = -1;
     }
 
     // check free disk space

@@ -195,6 +195,13 @@ It is necessary to set this value depending on a CPU and a network band.
 part size, in MB, for each multipart request.
 The minimum value is 5 MB and the maximum value is 5 GB.
 .TP
+\fB\-o\fR multipart_copy_size (default="512")
+part size, in MB, for each multipart copy request, used for
+renames and mixupload.
+The minimum value is 5 MB and the maximum value is 5 GB.
+Must be at least 512 MB to copy the maximum 5 TB object size
+but lower values may improve performance.
+.TP
 \fB\-o\fR max_dirty_data (default="5120")
 Flush dirty data to S3 after a certain number of MB written.
 The minimum value is 50 MB.  -1 value means disable.
@@ -204,6 +211,10 @@ Cannot be used with nomixupload.
 sets MB to ensure disk free space. This option means the threshold of free space size on disk which is used for the cache file by s3fs.
 s3fs makes file for downloading, uploading and caching files.
 If the disk free space is smaller than this value, s3fs do not use diskspace as possible in exchange for the performance.
+.TP
+\fB\-o\fR multipart_threshold (default="25")
+threshold, in MB, to use multipart upload instead of
+single-part.  Must be at least 5 MB.
 .TP
 \fB\-o\fR singlepart_copy_limit (default="512")
 maximum size, in MB, of a single-part copy before trying
@@ -294,6 +305,10 @@ If this option is specified with nocopyapi, then s3fs ignores it.
 \fB\-o\fR use_path_request_style (use legacy API calling style)
 Enable compatibility with S3-like APIs which do not support the virtual-host request style, by using the older path request style.
 .TP
+\fB\-o\fR listobjectsv2 (use ListObjectsV2)
+Issue ListObjectsV2 instead of ListObjects, useful on object
+stores without ListObjects support.
+.TP
 \fB\-o\fR noua (suppress User-Agent header)
 Usually s3fs outputs of the User-Agent in "s3fs/<version> (commit hash <hash>; <using ssl library name>)" format.
 If this option is specified, s3fs suppresses the output of the User-Agent.
@@ -358,6 +373,11 @@ Put the debug message from libcurl when this option is specified.
 Specify "normal" or "body" for the parameter.
 If the parameter is omitted, it is the same as "normal".
 If "body" is specified, some API communication body data will be output in addition to the debug message output as "normal".
+.TP
+\fB\-o\fR no_time_stamp_msg - no time stamp in debug message
+The time stamp is output to the debug message by default.
+If this option is specified, the time stamp will not be output in the debug message.
+It is the same even if the environment variable "S3FS_MSGTIMESTAMP" is set to "no".
 .TP
 \fB\-o\fR set_check_cache_sigusr1 (default is stdout)
 If the cache is enabled, you can check the integrity of the cache file and the cache file's stats info file.

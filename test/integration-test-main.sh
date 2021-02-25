@@ -344,6 +344,135 @@ function test_read_external_object() {
     rm -f ${TEST_TEXT_FILE}
 }
 
+function test_update_metadata_external_small_object() {
+    describe "update meta to small file after created file by aws cli"
+
+    # [NOTE]
+    # Use the only filename in the test to avoid being affected by noobjcache.
+    #
+    TEST_FILE_EXT=`make_random_string`
+    TEST_CHMOD_FILE="${TEST_TEXT_FILE}_chmod.${TEST_FILE_EXT}"
+    TEST_CHOWN_FILE="${TEST_TEXT_FILE}_chown.${TEST_FILE_EXT}"
+    TEST_UTIMENS_FILE="${TEST_TEXT_FILE}_utimens.${TEST_FILE_EXT}"
+    TEST_SETXATTR_FILE="${TEST_TEXT_FILE}_xattr.${TEST_FILE_EXT}"
+    TEST_RMXATTR_FILE="${TEST_TEXT_FILE}_xattr.${TEST_FILE_EXT}"
+
+    TEST_INPUT="TEST_STRING_IN_SMALL_FILE"
+
+    #
+    # chmod
+    #
+    OBJECT_NAME="$(basename $PWD)/${TEST_CHMOD_FILE}"
+    echo "${TEST_INPUT}" | aws_cli s3 cp - "s3://${TEST_BUCKET_1}/${OBJECT_NAME}"
+    chmod +x ${TEST_CHMOD_FILE}
+    cmp ${TEST_CHMOD_FILE} <(echo "${TEST_INPUT}")
+
+    #
+    # chown
+    #
+    OBJECT_NAME="$(basename $PWD)/${TEST_CHOWN_FILE}"
+    echo "${TEST_INPUT}" | aws_cli s3 cp - "s3://${TEST_BUCKET_1}/${OBJECT_NAME}"
+    chown $UID ${TEST_CHOWN_FILE}
+    cmp ${TEST_CHOWN_FILE} <(echo "${TEST_INPUT}")
+
+    #
+    # utimens
+    #
+    OBJECT_NAME="$(basename $PWD)/${TEST_UTIMENS_FILE}"
+    echo "${TEST_INPUT}" | aws_cli s3 cp - "s3://${TEST_BUCKET_1}/${OBJECT_NAME}"
+    touch ${TEST_UTIMENS_FILE}
+    cmp ${TEST_UTIMENS_FILE} <(echo "${TEST_INPUT}")
+
+    #
+    # set xattr
+    #
+    OBJECT_NAME="$(basename $PWD)/${TEST_SETXATTR_FILE}"
+    echo "${TEST_INPUT}" | aws_cli s3 cp - "s3://${TEST_BUCKET_1}/${OBJECT_NAME}"
+    set_xattr key value ${TEST_SETXATTR_FILE}
+    cmp ${TEST_SETXATTR_FILE} <(echo "${TEST_INPUT}")
+
+    #
+    # remove xattr
+    #
+    # "%7B%22key%22%3A%22dmFsdWU%3D%22%7D" = {"key":"value"}
+    #
+    OBJECT_NAME="$(basename $PWD)/${TEST_RMXATTR_FILE}"
+    echo "${TEST_INPUT}" | aws_cli s3 cp - "s3://${TEST_BUCKET_1}/${OBJECT_NAME}" --metadata xattr=%7B%22key%22%3A%22dmFsdWU%3D%22%7D
+    del_xattr key ${TEST_RMXATTR_FILE}
+    cmp ${TEST_RMXATTR_FILE} <(echo "${TEST_INPUT}")
+
+    rm -f ${TEST_CHMOD_FILE}
+    rm -f ${TEST_CHOWN_FILE}
+    rm -f ${TEST_UTIMENS_FILE}
+    rm -f ${TEST_SETXATTR_FILE}
+    rm -f ${TEST_RMXATTR_FILE}
+}
+
+function test_update_metadata_external_large_object() {
+    describe "update meta to large file after created file by aws cli"
+
+    # [NOTE]
+    # Use the only filename in the test to avoid being affected by noobjcache.
+    #
+    TEST_FILE_EXT=`make_random_string`
+    TEST_CHMOD_FILE="${TEST_TEXT_FILE}_chmod.${TEST_FILE_EXT}"
+    TEST_CHOWN_FILE="${TEST_TEXT_FILE}_chown.${TEST_FILE_EXT}"
+    TEST_UTIMENS_FILE="${TEST_TEXT_FILE}_utimens.${TEST_FILE_EXT}"
+    TEST_SETXATTR_FILE="${TEST_TEXT_FILE}_xattr.${TEST_FILE_EXT}"
+    TEST_RMXATTR_FILE="${TEST_TEXT_FILE}_xattr.${TEST_FILE_EXT}"
+
+    dd if=/dev/urandom of="${TEMP_DIR}/${BIG_FILE}" bs=$BIG_FILE_BLOCK_SIZE count=$BIG_FILE_COUNT
+
+    #
+    # chmod
+    #
+    OBJECT_NAME="$(basename $PWD)/${TEST_CHMOD_FILE}"
+    aws_cli s3 cp ${TEMP_DIR}/${BIG_FILE} "s3://${TEST_BUCKET_1}/${OBJECT_NAME}" --no-progress
+    chmod +x ${TEST_CHMOD_FILE}
+    cmp ${TEST_CHMOD_FILE} ${TEMP_DIR}/${BIG_FILE}
+
+    #
+    # chown
+    #
+    OBJECT_NAME="$(basename $PWD)/${TEST_CHOWN_FILE}"
+    aws_cli s3 cp ${TEMP_DIR}/${BIG_FILE} "s3://${TEST_BUCKET_1}/${OBJECT_NAME}" --no-progress
+    chown $UID ${TEST_CHOWN_FILE}
+    cmp ${TEST_CHOWN_FILE} ${TEMP_DIR}/${BIG_FILE}
+
+    #
+    # utimens
+    #
+    OBJECT_NAME="$(basename $PWD)/${TEST_UTIMENS_FILE}"
+    aws_cli s3 cp ${TEMP_DIR}/${BIG_FILE} "s3://${TEST_BUCKET_1}/${OBJECT_NAME}" --no-progress
+    touch ${TEST_UTIMENS_FILE}
+    cmp ${TEST_UTIMENS_FILE} ${TEMP_DIR}/${BIG_FILE}
+
+    #
+    # set xattr
+    #
+    OBJECT_NAME="$(basename $PWD)/${TEST_SETXATTR_FILE}"
+    aws_cli s3 cp ${TEMP_DIR}/${BIG_FILE} "s3://${TEST_BUCKET_1}/${OBJECT_NAME}" --no-progress
+    set_xattr key value ${TEST_SETXATTR_FILE}
+    cmp ${TEST_SETXATTR_FILE} ${TEMP_DIR}/${BIG_FILE}
+
+    #
+    # remove xattr
+    #
+    # "%7B%22key%22%3A%22dmFsdWU%3D%22%7D" = {"key":"value"}
+    #
+    OBJECT_NAME="$(basename $PWD)/${TEST_RMXATTR_FILE}"
+    aws_cli s3 cp ${TEMP_DIR}/${BIG_FILE} "s3://${TEST_BUCKET_1}/${OBJECT_NAME}" --no-progress --metadata xattr=%7B%22key%22%3A%22dmFsdWU%3D%22%7D
+    del_xattr key ${TEST_RMXATTR_FILE}
+    cmp ${TEST_RMXATTR_FILE} ${TEMP_DIR}/${BIG_FILE}
+
+    rm -f ${TEMP_DIR}/${BIG_FILE}
+    rm -f ${TEST_CHMOD_FILE}
+    rm -f ${TEST_CHOWN_FILE}
+    rm -f ${TEST_UTIMENS_FILE}
+    rm -f ${TEST_SETXATTR_FILE}
+    rm -f ${TEST_RMXATTR_FILE}
+}
+
 function test_rename_before_close {
     describe "Testing rename before close ..."
     (
@@ -363,30 +492,30 @@ function test_rename_before_close {
 function test_multipart_upload {
     describe "Testing multi-part upload ..."
 
-    dd if=/dev/urandom of="/tmp/${BIG_FILE}" bs=$BIG_FILE_LENGTH count=1
-    dd if="/tmp/${BIG_FILE}" of="${BIG_FILE}" bs=$BIG_FILE_LENGTH count=1
+    dd if=/dev/urandom of="${TEMP_DIR}/${BIG_FILE}" bs=$BIG_FILE_BLOCK_SIZE count=$BIG_FILE_COUNT
+    dd if="${TEMP_DIR}/${BIG_FILE}" of="${BIG_FILE}" bs=$BIG_FILE_BLOCK_SIZE count=$BIG_FILE_COUNT
 
     # Verify contents of file
     echo "Comparing test file"
-    if ! cmp "/tmp/${BIG_FILE}" "${BIG_FILE}"
+    if ! cmp "${TEMP_DIR}/${BIG_FILE}" "${BIG_FILE}"
     then
        return 1
     fi
 
-    rm -f "/tmp/${BIG_FILE}"
+    rm -f "${TEMP_DIR}/${BIG_FILE}"
     rm_test_file "${BIG_FILE}"
 }
 
 function test_multipart_copy {
     describe "Testing multi-part copy ..."
 
-    dd if=/dev/urandom of="/tmp/${BIG_FILE}" bs=$BIG_FILE_LENGTH count=1
-    dd if="/tmp/${BIG_FILE}" of="${BIG_FILE}" bs=$BIG_FILE_LENGTH count=1
+    dd if=/dev/urandom of="${TEMP_DIR}/${BIG_FILE}" bs=$BIG_FILE_BLOCK_SIZE count=$BIG_FILE_COUNT
+    dd if="${TEMP_DIR}/${BIG_FILE}" of="${BIG_FILE}" bs=$BIG_FILE_BLOCK_SIZE count=$BIG_FILE_COUNT
     mv "${BIG_FILE}" "${BIG_FILE}-copy"
 
     # Verify contents of file
     echo "Comparing test file"
-    if ! cmp "/tmp/${BIG_FILE}" "${BIG_FILE}-copy"
+    if ! cmp "${TEMP_DIR}/${BIG_FILE}" "${BIG_FILE}-copy"
     then
        return 1
     fi
@@ -394,7 +523,7 @@ function test_multipart_copy {
     #check the renamed file content-type
     check_content_type "$1/${BIG_FILE}-copy" "application/octet-stream"
 
-    rm -f "/tmp/${BIG_FILE}"
+    rm -f "${TEMP_DIR}/${BIG_FILE}"
     rm_test_file "${BIG_FILE}-copy"
 }
 
@@ -404,24 +533,24 @@ function test_multipart_mix {
     if [ `uname` = "Darwin" ]; then
        cat /dev/null > $BIG_FILE
     fi
-    dd if=/dev/urandom of="/tmp/${BIG_FILE}" bs=$BIG_FILE_LENGTH seek=0 count=1
-    dd if="/tmp/${BIG_FILE}" of="${BIG_FILE}" bs=$BIG_FILE_LENGTH seek=0 count=1
+    dd if=/dev/urandom of="${TEMP_DIR}/${BIG_FILE}" bs=$BIG_FILE_BLOCK_SIZE count=$BIG_FILE_COUNT
+    dd if="${TEMP_DIR}/${BIG_FILE}" of="${BIG_FILE}" bs=$BIG_FILE_BLOCK_SIZE count=$BIG_FILE_COUNT
 
     # (1) Edit the middle of an existing file
     #     modify directly(seek 7.5MB offset)
     #     In the case of nomultipart and nocopyapi,
     #     it makes no sense, but copying files is because it leaves no cache.
     #
-    cp /tmp/${BIG_FILE} /tmp/${BIG_FILE}-mix
+    cp ${TEMP_DIR}/${BIG_FILE} ${TEMP_DIR}/${BIG_FILE}-mix
     cp ${BIG_FILE} ${BIG_FILE}-mix
 
     MODIFY_START_BLOCK=$((15*1024*1024/2/4))
     echo -n "0123456789ABCDEF" | dd of="${BIG_FILE}-mix" bs=4 count=4 seek=$MODIFY_START_BLOCK conv=notrunc
-    echo -n "0123456789ABCDEF" | dd of="/tmp/${BIG_FILE}-mix" bs=4 count=4 seek=$MODIFY_START_BLOCK conv=notrunc
+    echo -n "0123456789ABCDEF" | dd of="${TEMP_DIR}/${BIG_FILE}-mix" bs=4 count=4 seek=$MODIFY_START_BLOCK conv=notrunc
 
     # Verify contents of file
     echo "Comparing test file (1)"
-    if ! cmp "/tmp/${BIG_FILE}-mix" "${BIG_FILE}-mix"
+    if ! cmp "${TEMP_DIR}/${BIG_FILE}-mix" "${BIG_FILE}-mix"
     then
        return 1
     fi
@@ -429,31 +558,31 @@ function test_multipart_mix {
     # (2) Write to an area larger than the size of the existing file
     #     modify directly(over file end offset)
     #
-    cp /tmp/${BIG_FILE} /tmp/${BIG_FILE}-mix
+    cp ${TEMP_DIR}/${BIG_FILE} ${TEMP_DIR}/${BIG_FILE}-mix
     cp ${BIG_FILE} ${BIG_FILE}-mix
 
     OVER_FILE_BLOCK_POS=$((26*1024*1024/4))
     echo -n "0123456789ABCDEF" | dd of="${BIG_FILE}-mix" bs=4 count=4 seek=$OVER_FILE_BLOCK_POS conv=notrunc
-    echo -n "0123456789ABCDEF" | dd of="/tmp/${BIG_FILE}-mix" bs=4 count=4 seek=$OVER_FILE_BLOCK_POS conv=notrunc
+    echo -n "0123456789ABCDEF" | dd of="${TEMP_DIR}/${BIG_FILE}-mix" bs=4 count=4 seek=$OVER_FILE_BLOCK_POS conv=notrunc
 
     # Verify contents of file
     echo "Comparing test file (2)"
-    if ! cmp "/tmp/${BIG_FILE}-mix" "${BIG_FILE}-mix"
+    if ! cmp "${TEMP_DIR}/${BIG_FILE}-mix" "${BIG_FILE}-mix"
     then
        return 1
     fi
 
     # (3) Writing from the 0th byte
     #
-    cp /tmp/${BIG_FILE} /tmp/${BIG_FILE}-mix
+    cp ${TEMP_DIR}/${BIG_FILE} ${TEMP_DIR}/${BIG_FILE}-mix
     cp ${BIG_FILE} ${BIG_FILE}-mix
 
     echo -n "0123456789ABCDEF" | dd of="${BIG_FILE}-mix" bs=4 count=4 seek=0 conv=notrunc
-    echo -n "0123456789ABCDEF" | dd of="/tmp/${BIG_FILE}-mix" bs=4 count=4 seek=0 conv=notrunc
+    echo -n "0123456789ABCDEF" | dd of="${TEMP_DIR}/${BIG_FILE}-mix" bs=4 count=4 seek=0 conv=notrunc
 
     # Verify contents of file
     echo "Comparing test file (3)"
-    if ! cmp "/tmp/${BIG_FILE}-mix" "${BIG_FILE}-mix"
+    if ! cmp "${TEMP_DIR}/${BIG_FILE}-mix" "${BIG_FILE}-mix"
     then
        return 1
     fi
@@ -461,22 +590,22 @@ function test_multipart_mix {
     # (4) Write to the area within 5MB from the top
     #     modify directly(seek 1MB offset)
     #
-    cp /tmp/${BIG_FILE} /tmp/${BIG_FILE}-mix
+    cp ${TEMP_DIR}/${BIG_FILE} ${TEMP_DIR}/${BIG_FILE}-mix
     cp ${BIG_FILE} ${BIG_FILE}-mix
 
     MODIFY_START_BLOCK=$((1*1024*1024))
     echo -n "0123456789ABCDEF" | dd of="${BIG_FILE}-mix" bs=4 count=4 seek=$MODIFY_START_BLOCK conv=notrunc
-    echo -n "0123456789ABCDEF" | dd of="/tmp/${BIG_FILE}-mix" bs=4 count=4 seek=$MODIFY_START_BLOCK conv=notrunc
+    echo -n "0123456789ABCDEF" | dd of="${TEMP_DIR}/${BIG_FILE}-mix" bs=4 count=4 seek=$MODIFY_START_BLOCK conv=notrunc
 
     # Verify contents of file
     echo "Comparing test file (4)"
-    if ! cmp "/tmp/${BIG_FILE}-mix" "${BIG_FILE}-mix"
+    if ! cmp "${TEMP_DIR}/${BIG_FILE}-mix" "${BIG_FILE}-mix"
     then
        return 1
     fi
 
-    rm -f "/tmp/${BIG_FILE}"
-    rm -f "/tmp/${BIG_FILE}-mix"
+    rm -f "${TEMP_DIR}/${BIG_FILE}"
+    rm -f "${TEMP_DIR}/${BIG_FILE}-mix"
     rm_test_file "${BIG_FILE}"
     rm_test_file "${BIG_FILE}-mix"
 }
@@ -494,6 +623,7 @@ function test_special_characters {
     )
 
     mkdir "TOYOTA TRUCK 8.2.2"
+    rm -rf "TOYOTA TRUCK 8.2.2"
 }
 
 function test_hardlink {
@@ -507,6 +637,9 @@ function test_hardlink {
         set +o pipefail
         ln $TEST_TEXT_FILE $ALT_TEST_TEXT_FILE 2>&1 | grep -q 'Operation not supported'
     )
+
+    rm_test_file
+    rm_test_file $ALT_TEST_TEXT_FILE
 }
 
 function test_symlink {
@@ -864,7 +997,8 @@ function test_update_directory_time() {
        return 1
     fi
 
-    rm -r $TIME_TEST_DIR
+    rm -rf $TIME_TEST_SUBDIR
+    rm -rf $TIME_TEST_DIR
 }
 
 function test_rm_rf_dir {
@@ -930,7 +1064,7 @@ function test_concurrent_directory_updates {
 
 function test_concurrent_reads {
     describe "Test concurrent reads from a file ..."
-    dd if=/dev/urandom of=${TEST_TEXT_FILE} bs=$BIG_FILE_LENGTH count=1
+    dd if=/dev/urandom of="${TEST_TEXT_FILE}" bs=$BIG_FILE_BLOCK_SIZE count=$BIG_FILE_COUNT
     for process in `seq 10`; do
         dd if=${TEST_TEXT_FILE} of=/dev/null seek=$(($RANDOM % $BIG_FILE_LENGTH)) count=16 bs=1024 &
     done
@@ -940,7 +1074,7 @@ function test_concurrent_reads {
 
 function test_concurrent_writes {
     describe "Test concurrent writes to a file ..."
-    dd if=/dev/urandom of=${TEST_TEXT_FILE} bs=$BIG_FILE_LENGTH count=1
+    dd if=/dev/urandom of="${TEST_TEXT_FILE}" bs=$BIG_FILE_BLOCK_SIZE count=$BIG_FILE_COUNT
     for process in `seq 10`; do
         dd if=/dev/zero of=${TEST_TEXT_FILE} seek=$(($RANDOM % $BIG_FILE_LENGTH)) count=16 bs=1024 conv=notrunc &
     done
@@ -1029,6 +1163,11 @@ function test_content_type() {
         echo "Unexpected Content-Type: $CONTENT_TYPE"
         return 1;
     fi
+
+    rm -f test.txt
+    rm -f test.jpg
+    rm -f test.bin
+    rm -rf test.dir
 }
 
 # create more files than -o max_stat_cache_size
@@ -1042,12 +1181,14 @@ function test_truncate_cache() {
         done
         ls $dir
     done
+
+    rm -rf `seq 2`
 }
 
 function test_cache_file_stat() {
     describe "Test cache file stat ..."
 
-    dd if=/dev/urandom of="${BIG_FILE}" bs=${BIG_FILE_LENGTH} count=1
+    dd if=/dev/urandom of="${BIG_FILE}" bs=$BIG_FILE_BLOCK_SIZE count=$BIG_FILE_COUNT
 
     #
     # get "testrun-xxx" directory name
@@ -1143,7 +1284,7 @@ function test_upload_sparsefile {
     describe "Testing upload sparse file ..."
 
     rm_test_file ${BIG_FILE}
-    rm -f /tmp/${BIG_FILE}
+    rm -f ${TEMP_DIR}/${BIG_FILE}
 
     #
     # Make all HOLE file
@@ -1155,20 +1296,20 @@ function test_upload_sparsefile {
     # (Dare to remove the block breaks)
     #
     WRITE_POS=$((${BIG_FILE_LENGTH} / 2 - 128))
-    echo -n "0123456789ABCDEF" | dd of="/tmp/${BIG_FILE}" bs=1 count=16 seek=${WRITE_POS} conv=notrunc
+    echo -n "0123456789ABCDEF" | dd of="${TEMP_DIR}/${BIG_FILE}" bs=1 count=16 seek=${WRITE_POS} conv=notrunc
 
     #
     # copy(upload) the file
     #
-    cp /tmp/${BIG_FILE} ${BIG_FILE}
+    cp ${TEMP_DIR}/${BIG_FILE} ${BIG_FILE}
 
     #
     # check
     #
-    cmp /tmp/${BIG_FILE} ${BIG_FILE}
+    cmp ${TEMP_DIR}/${BIG_FILE} ${BIG_FILE}
 
     rm_test_file ${BIG_FILE}
-    rm -f /tmp/${BIG_FILE}
+    rm -f ${TEMP_DIR}/${BIG_FILE}
 }
 
 function test_mix_upload_entities() {
@@ -1177,7 +1318,7 @@ function test_mix_upload_entities() {
     #
     # Make test file
     #
-    dd if=/dev/urandom of=${BIG_FILE} bs=$BIG_FILE_LENGTH count=1
+    dd if=/dev/urandom of="${BIG_FILE}" bs=$BIG_FILE_BLOCK_SIZE count=$BIG_FILE_COUNT
 
     #
     # If the cache option is enabled, delete the cache of uploaded files.
@@ -1214,7 +1355,7 @@ function test_ensurespace_move_file() {
     # Make test file which is not under mountpoint
     #
     mkdir -p ${CACHE_DIR}/.s3fs_test_tmpdir
-    dd if=/dev/urandom of="${CACHE_DIR}/.s3fs_test_tmpdir/${BIG_FILE}" bs=$BIG_FILE_LENGTH count=1
+    dd if=/dev/urandom of="${CACHE_DIR}/.s3fs_test_tmpdir/${BIG_FILE}" bs=$BIG_FILE_BLOCK_SIZE count=$BIG_FILE_COUNT
 
     #
     # Backup file stat
@@ -1303,6 +1444,15 @@ function add_all_tests {
     fi
     add_tests test_external_modification
     add_tests test_read_external_object
+    add_tests test_update_metadata_external_small_object
+    if ! uname | grep -q Darwin; then
+        # [NOTE]
+        # This test is very time consuming on OSX and will not run.
+        # And this test should be no different between OSX and
+        # other OSs. so skip this test on OSX.
+        #
+        add_tests test_update_metadata_external_large_object
+    fi
     add_tests test_rename_before_close
     add_tests test_multipart_upload
     add_tests test_multipart_copy

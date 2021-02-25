@@ -31,7 +31,9 @@
 # TEST_BUCKET_1=bucketname           Name of bucket to use 
 # S3PROXY_BINARY=""                  Specify empty string to skip S3Proxy start
 # S3_URL="https://s3.amazonaws.com"  Specify Amazon AWS as the S3 provider
-# S3_ENDPOINT="us-east-1"             Specify region
+# S3_ENDPOINT="us-east-1"            Specify region
+# TMPDIR="/var/tmp"                  Set to use a temporary directory different
+#                                    from /var/tmp
 #
 # Example of running against Amazon S3 using a bucket named "bucket":
 #
@@ -106,7 +108,7 @@ function retry {
     status=0
     for i in $(seq $N); do
         echo "Trying: $*"
-        "$@"
+        eval $@
         status=$?
         if [ $status == 0 ]; then
             break
@@ -255,6 +257,7 @@ function start_s3fs {
             -o stat_cache_expire=1 \
             -o stat_cache_interval_expire=1 \
             -o dbglevel=${DBGLEVEL:=info} \
+            -o no_time_stamp_msg \
             -o retries=3 \
             -f \
             "${@}" &
@@ -296,7 +299,7 @@ function stop_s3fs {
     # Retry in case file system is in use
     if [ `uname` = "Darwin" ]; then
         if df | grep -q $TEST_BUCKET_MOUNT_POINT_1; then
-            retry 10 df | grep -q $TEST_BUCKET_MOUNT_POINT_1 && umount $TEST_BUCKET_MOUNT_POINT_1
+            retry 10 df "|" grep -q $TEST_BUCKET_MOUNT_POINT_1 "&&" umount $TEST_BUCKET_MOUNT_POINT_1
         fi
     else
         if grep -q $TEST_BUCKET_MOUNT_POINT_1 /proc/mounts; then 

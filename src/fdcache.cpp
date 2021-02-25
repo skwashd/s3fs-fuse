@@ -29,6 +29,7 @@
 #include "s3fs.h"
 #include "fdcache.h"
 #include "s3fs_util.h"
+#include "s3fs_logger.h"
 #include "string_util.h"
 #include "autolock.h"
 
@@ -50,14 +51,14 @@
 // The following symbols are used by FdManager::RawCheckAllCache().
 //
 #define CACHEDBG_FMT_DIR_PROB   "Directory: %s"
-#define CACHEDBG_FMT_HEAD       "------------------------------------------------------------\n" \
-                                "Check cache file and its stats file consistency\n" \
-                                "------------------------------------------------------------"
-#define CACHEDBG_FMT_FOOT       "------------------------------------------------------------\n" \
+#define CACHEDBG_FMT_HEAD       "---------------------------------------------------------------------------\n" \
+                                "Check cache file and its stats file consistency at %s\n"                       \
+                                "---------------------------------------------------------------------------"
+#define CACHEDBG_FMT_FOOT       "---------------------------------------------------------------------------\n" \
                                 "Summary - Total files:                %d\n" \
                                 "          Detected error files:       %d\n" \
                                 "          Detected error directories: %d\n" \
-                                "------------------------------------------------------------"
+                                "---------------------------------------------------------------------------"
 #define CACHEDBG_FMT_FILE_OK    "File:      %s%s    -> [OK] no problem"
 #define CACHEDBG_FMT_FILE_PROB  "File:      %s%s"
 #define CACHEDBG_FMT_DIR_PROB   "Directory: %s"
@@ -354,17 +355,17 @@ FdManager::FdManager()
 #if S3FS_PTHREAD_ERRORCHECK
         pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK);
 #endif
-        int res;
-        if(0 != (res = pthread_mutex_init(&FdManager::fd_manager_lock, &attr))){
-            S3FS_PRN_CRIT("failed to init fd_manager_lock: %d", res);
+        int result;
+        if(0 != (result = pthread_mutex_init(&FdManager::fd_manager_lock, &attr))){
+            S3FS_PRN_CRIT("failed to init fd_manager_lock: %d", result);
             abort();
         }
-        if(0 != (res = pthread_mutex_init(&FdManager::cache_cleanup_lock, &attr))){
-            S3FS_PRN_CRIT("failed to init cache_cleanup_lock: %d", res);
+        if(0 != (result = pthread_mutex_init(&FdManager::cache_cleanup_lock, &attr))){
+            S3FS_PRN_CRIT("failed to init cache_cleanup_lock: %d", result);
             abort();
         }
-        if(0 != (res = pthread_mutex_init(&FdManager::reserved_diskspace_lock, &attr))){
-            S3FS_PRN_CRIT("failed to init reserved_diskspace_lock: %d", res);
+        if(0 != (result = pthread_mutex_init(&FdManager::reserved_diskspace_lock, &attr))){
+            S3FS_PRN_CRIT("failed to init reserved_diskspace_lock: %d", result);
             abort();
         }
         FdManager::is_lock_init = true;
@@ -384,17 +385,17 @@ FdManager::~FdManager()
         fent.clear();
 
         if(FdManager::is_lock_init){
-            int res;
-            if(0 != (res = pthread_mutex_destroy(&FdManager::fd_manager_lock))){
-                S3FS_PRN_CRIT("failed to destroy fd_manager_lock: %d", res);
+            int result;
+            if(0 != (result = pthread_mutex_destroy(&FdManager::fd_manager_lock))){
+                S3FS_PRN_CRIT("failed to destroy fd_manager_lock: %d", result);
                 abort();
             }
-            if(0 != (res = pthread_mutex_destroy(&FdManager::cache_cleanup_lock))){
-                S3FS_PRN_CRIT("failed to destroy cache_cleanup_lock: %d", res);
+            if(0 != (result = pthread_mutex_destroy(&FdManager::cache_cleanup_lock))){
+                S3FS_PRN_CRIT("failed to destroy cache_cleanup_lock: %d", result);
                 abort();
             }
-            if(0 != (res = pthread_mutex_destroy(&FdManager::reserved_diskspace_lock))){
-                S3FS_PRN_CRIT("failed to destroy reserved_diskspace_lock: %d", res);
+            if(0 != (result = pthread_mutex_destroy(&FdManager::reserved_diskspace_lock))){
+                S3FS_PRN_CRIT("failed to destroy reserved_diskspace_lock: %d", result);
                 abort();
             }
             FdManager::is_lock_init = false;
@@ -905,7 +906,7 @@ bool FdManager::CheckAllCache()
     }
 
     // print head message
-    S3FS_PRN_CACHE(fp, CACHEDBG_FMT_HEAD);
+    S3FS_PRN_CACHE(fp, CACHEDBG_FMT_HEAD, S3fsLog::GetCurrentTime());
 
     // Loop in directory of cache file's stats
     std::string top_path  = CacheFileStat::GetCacheFileStatTopDir();

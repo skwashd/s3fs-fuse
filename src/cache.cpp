@@ -150,7 +150,7 @@ pthread_mutex_t StatCache::stat_cache_lock;
 //-------------------------------------------------------------------
 // Constructor/Destructor
 //-------------------------------------------------------------------
-StatCache::StatCache() : IsExpireTime(false), IsExpireIntervalType(false), ExpireTime(15 * 60), CacheSize(100000), IsCacheNoObject(false)
+StatCache::StatCache() : IsExpireTime(true), IsExpireIntervalType(false), ExpireTime(15 * 60), CacheSize(100000), IsCacheNoObject(false)
 {
     if(this == StatCache::getStatCacheData()){
         stat_cache.clear();
@@ -159,9 +159,9 @@ StatCache::StatCache() : IsExpireTime(false), IsExpireIntervalType(false), Expir
 #if S3FS_PTHREAD_ERRORCHECK
         pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK);
 #endif
-        int res;
-        if(0 != (res = pthread_mutex_init(&StatCache::stat_cache_lock, &attr))){
-            S3FS_PRN_CRIT("failed to init stat_cache_lock: %d", res);
+        int result;
+        if(0 != (result = pthread_mutex_init(&StatCache::stat_cache_lock, &attr))){
+            S3FS_PRN_CRIT("failed to init stat_cache_lock: %d", result);
             abort();
         }
     }else{
@@ -173,9 +173,9 @@ StatCache::~StatCache()
 {
     if(this == StatCache::getStatCacheData()){
         Clear();
-        int res = pthread_mutex_destroy(&StatCache::stat_cache_lock);
-        if(res != 0){
-            S3FS_PRN_CRIT("failed to destroy stat_cache_lock: %d", res);
+        int result = pthread_mutex_destroy(&StatCache::stat_cache_lock);
+        if(result != 0){
+            S3FS_PRN_CRIT("failed to destroy stat_cache_lock: %d", result);
             abort();
         }
     }else{
@@ -588,7 +588,7 @@ bool StatCache::DelStat(const char* key, bool lock_already_held)
         std::string strpath = key;
         if('/' == strpath[strpath.length() - 1]){
             // If there is "path" cache, delete it.
-            strpath = strpath.substr(0, strpath.length() - 1);
+            strpath.erase(strpath.length() - 1);
         }else{
             // If there is "path/" cache, delete it.
             strpath += "/";

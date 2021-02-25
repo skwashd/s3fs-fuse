@@ -31,7 +31,12 @@ TEST_DIR=testdir
 ALT_TEST_TEXT_FILE=test-s3fs-ALT.txt
 TEST_TEXT_FILE_LENGTH=15
 BIG_FILE=big-file-s3fs.txt
-BIG_FILE_LENGTH=$((25 * 1024 * 1024))
+TEMP_DIR=${TMPDIR:-"/var/tmp"}
+# /dev/urandom can only return 32 MB per block maximum
+BIG_FILE_BLOCK_SIZE=$((25 * 1024 * 1024))
+BIG_FILE_COUNT=1
+# This should be greater than the multipart size
+BIG_FILE_LENGTH=$(($BIG_FILE_BLOCK_SIZE * $BIG_FILE_COUNT))
 export RUN_DIR
 
 # [NOTE]
@@ -170,7 +175,7 @@ function rm_test_dir {
 # Sets RUN_DIR to the name of the created directory
 function cd_run_dir {
     if [ "$TEST_BUCKET_MOUNT_POINT_1" == "" ]; then
-        echo "TEST_BUCKET_MOUNT_POINT variable not set"
+        echo "TEST_BUCKET_MOUNT_POINT_1 variable not set"
         exit 1
     fi
     RUN_DIR=${TEST_BUCKET_MOUNT_POINT_1}/${1}
@@ -330,6 +335,16 @@ function wait_for_port() {
         fi
         sleep 1
     done
+}
+
+function make_random_string() {
+    if [ -n "$1" ]; then
+        END_POS=$1
+    else
+        END_POS=8
+    fi
+    RANDOM_STR=`cat /dev/urandom | base64 | sed 's#[/|+]##g' | head -1 | cut -c 1-${END_POS}`
+    echo "${RANDOM_STR}"
 }
 
 #
