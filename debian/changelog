@@ -1,4 +1,4 @@
-s3fs-fuse (1.89-1) unstable; urgency=medium
+s3fs-fuse (1.89-1) trusty; urgency=medium
 
   * New upstream release 1.89.
 

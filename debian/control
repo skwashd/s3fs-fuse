@@ -5,11 +5,10 @@ Maintainer: Andrii Senkovych <andrii@senkovych.com>
 Uploaders:
  Mattia Rizzolo <mattia@debian.org>,
 Build-Depends:
- debhelper-compat (= 13),
+ dh-make,
+ automake,
  libcurl4-gnutls-dev,
  libfuse-dev,
- libgcrypt20-dev,
- libgnutls28-dev,
  libxml2-dev,
  pkg-config,
 Standards-Version: 4.5.1
